@@ -210,6 +210,67 @@ def get_local_llm_model():
         except Exception as e:
             raise RuntimeError(f"Erreur lors du chargement du modèle LLM: {e}")
     return _local_llm_model
+
+
+def call_local_llm(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 512,
+    temperature: float = 0.7
+) -> str:
+    """
+    Appelle le LLM local avec un prompt système et utilisateur.
+
+    Args:
+        system_prompt: Instructions système
+        user_prompt: Prompt utilisateur
+        max_tokens: Nombre maximum de tokens à générer
+        temperature: Température de génération
+
+    Returns:
+        Texte généré par le modèle
+    """
+    llm = get_local_llm_model()
+    if llm is None:
+        raise RuntimeError("Aucun modèle LLM local configuré")
+
+    if isinstance(llm, dict):  # HuggingFace model
+        model = llm["model"]
+        tokenizer = llm["tokenizer"]
+        device = llm["device"]
+
+        prompt = f"{system_prompt}\n\n{user_prompt}"
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+
+        if device == "cuda":
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        import torch
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
+            )
+
+        input_length = inputs['input_ids'].shape[1]
+        new_tokens = outputs[0][input_length:]
+        response = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    else:  # GGUF model (llama-cpp-python)
+        prompt = f"{system_prompt}\n\n{user_prompt}\n\nAssistant:"
+        output = llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=["User:", "\n\n"],
+            echo=False
+        )
+        response = output["choices"][0]["text"].strip()
+
+    return response
 # ═══════════════════════════════════════════════════════════════════
 # FIN BLOC MODE TEST LOCAL
 # ═══════════════════════════════════════════════════════════════════
