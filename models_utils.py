@@ -198,7 +198,7 @@ def get_local_llm_model():
                     model = AutoModelForCausalLM.from_pretrained(
                         LOCAL_LLM_PATH,
                         device_map="auto" if device == "cuda" else None,
-                        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                        dtype=torch.float16 if device == "cuda" else torch.float32,
                         low_cpu_mem_usage=True
                     )
                     _local_llm_model = {"model": model, "tokenizer": tokenizer, "device": device}
