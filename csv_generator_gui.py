@@ -10,6 +10,15 @@ import csv
 import os
 from typing import List, Dict
 
+# Import de la configuration des chemins
+try:
+    from config_manager import load_config
+    _config = load_config()
+    CSV_IMPORT_DIR = _config.csv_import_dir
+except ImportError:
+    # Fallback si config_manager n'est pas disponible
+    CSV_IMPORT_DIR = r"N:\DA\SOC\RDA\ORG\DGT\POLE-SYSTEME\ENERGIE\RESERVE\PROP\Knowledge\IA_PROP\FAISS_DATABASE\CSV_Ingestion"
+
 
 class ToolTip:
     """
@@ -74,8 +83,6 @@ class ToolTip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
-# Configuration des chemins - FAISS (SANS ESPACES pour compatibilité C++)
-CSV_IMPORT_DIR = r"N:\DA\SOC\RDA\ORG\DGT\POLE-SYSTEME\ENERGIE\RESERVE\PROP\Knowledge\IA_PROP\FAISS_DATABASE\CSV_Ingestion"
 
 # Configuration du thème
 ctk.set_appearance_mode("dark")  # "dark", "light", ou "system"
