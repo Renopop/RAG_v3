@@ -642,6 +642,35 @@ with tab_ingest:
 
     st.markdown("---")
 
+    # Sélection de CSV depuis CSV_IMPORT_DIR
+    st.markdown(f"### 📂 Sélectionner des CSV depuis `{CSV_IMPORT_DIR}`")
+
+    # Lister les fichiers CSV disponibles dans CSV_IMPORT_DIR
+    available_csvs = []
+    if CSV_IMPORT_DIR and os.path.isdir(CSV_IMPORT_DIR):
+        available_csvs = sorted([
+            f for f in os.listdir(CSV_IMPORT_DIR)
+            if f.lower().endswith('.csv')
+        ])
+
+    if available_csvs:
+        selected_csv_files = st.multiselect(
+            "Fichiers CSV disponibles",
+            options=available_csvs,
+            help=f"Sélectionnez un ou plusieurs CSV depuis {CSV_IMPORT_DIR}"
+        )
+    else:
+        selected_csv_files = []
+        if not CSV_IMPORT_DIR:
+            st.warning("⚠️ CSV_IMPORT_DIR non configuré")
+        elif not os.path.isdir(CSV_IMPORT_DIR):
+            st.warning(f"⚠️ Répertoire inexistant : {CSV_IMPORT_DIR}")
+        else:
+            st.info("Aucun fichier CSV trouvé dans le répertoire")
+
+    st.markdown("---")
+    st.markdown("### 📤 Ou uploader des CSV")
+
     uploaded_csvs = st.file_uploader(
         "Upload CSV",
         type=["csv"],
@@ -649,6 +678,20 @@ with tab_ingest:
         key="csv_ingest",
         label_visibility="collapsed"
     )
+
+    # Combiner les CSV sélectionnés et uploadés
+    csv_files_to_process = []
+
+    # Ajouter les CSV sélectionnés depuis le répertoire
+    for csv_name in selected_csv_files:
+        csv_path = os.path.join(CSV_IMPORT_DIR, csv_name)
+        if os.path.exists(csv_path):
+            csv_files_to_process.append(("local", csv_name, csv_path))
+
+    # Ajouter les CSV uploadés
+    if uploaded_csvs:
+        for uploaded in uploaded_csvs:
+            csv_files_to_process.append(("uploaded", uploaded.name, uploaded))
 
     # Afficher l'état des bases (indicateur de disponibilité pour coordination)
     st.markdown("---")
@@ -701,13 +744,18 @@ with tab_ingest:
     if "detected_xml_files" not in st.session_state:
         st.session_state["detected_xml_files"] = []
 
-    def detect_xml_files_in_csvs(csv_files) -> List[str]:
-        """Analyse les CSV uploadés pour trouver les fichiers XML."""
+    def detect_xml_files_in_csvs(csv_list) -> List[str]:
+        """Analyse les CSV (locaux ou uploadés) pour trouver les fichiers XML."""
         xml_files = []
-        for cf in csv_files:
-            cf.seek(0)
-            content = cf.read()
-            cf.seek(0)
+        for source_type, csv_name, csv_source in csv_list:
+            # Lire le contenu selon la source
+            if source_type == "local":
+                with open(csv_source, "rb") as f:
+                    content = f.read()
+            else:
+                csv_source.seek(0)
+                content = csv_source.read()
+                csv_source.seek(0)
             groups = parse_csv_groups_and_paths(content)
             for group_name, paths in groups.items():
                 for path in paths:
@@ -716,10 +764,10 @@ with tab_ingest:
                             xml_files.append(path)
         return xml_files
 
-    # Détecter les fichiers XML quand des CSV sont uploadés
+    # Détecter les fichiers XML quand des CSV sont sélectionnés/uploadés
     xml_files_detected = []
-    if uploaded_csvs:
-        xml_files_detected = detect_xml_files_in_csvs(uploaded_csvs)
+    if csv_files_to_process:
+        xml_files_detected = detect_xml_files_in_csvs(csv_files_to_process)
         st.session_state["detected_xml_files"] = xml_files_detected
 
     # Afficher l'interface de prévisualisation XML si des fichiers XML sont détectés
@@ -854,15 +902,14 @@ with tab_ingest:
             return entries
 
         # Rien à ingérer ?
-        if not uploaded_csvs:
-            st.warning("Aucun CSV d'ingestion uploadé.")
+        if not csv_files_to_process:
+            st.warning("Aucun CSV d'ingestion sélectionné ou uploadé.")
         else:
             # Collecter les bases qui vont être modifiées (depuis les noms de CSV)
             bases_to_ingest = set()
-            if uploaded_csvs:
-                for cf in uploaded_csvs:
-                    base_name = Path(cf.name).stem
-                    bases_to_ingest.add(base_name)
+            for source_type, csv_name, _ in csv_files_to_process:
+                base_name = Path(csv_name).stem
+                bases_to_ingest.add(base_name)
 
             # Vérifier qu'aucune base n'est déjà verrouillée
             locked_bases = []
@@ -909,23 +956,28 @@ with tab_ingest:
                 # ------------------------------------------------------------------
                 # 1) Ingestion à partir des CSV
                 # ------------------------------------------------------------------
-                if uploaded_csvs:
+                if csv_files_to_process:
                     csv_temp_dir = tempfile.mkdtemp(prefix="rag_ingest_csv_")
                     try:
-                        for cf in uploaded_csvs:
-                            cf.seek(0)
-                            data = cf.read()
+                        for source_type, csv_name, csv_source in csv_files_to_process:
+                            # Lire le contenu selon la source (locale ou uploadée)
+                            if source_type == "local":
+                                with open(csv_source, "rb") as f:
+                                    data = f.read()
+                            else:
+                                csv_source.seek(0)
+                                data = csv_source.read()
 
                             groups = parse_csv_groups_and_paths(data)
                             if not groups:
-                                st.warning(f"Aucune donnée exploitable dans le CSV {cf.name}")
+                                st.warning(f"Aucune donnée exploitable dans le CSV {csv_name}")
                                 continue
 
                             total_files_in_csv = sum(len(paths) for paths in groups.values())
-                            base_name = Path(cf.name).stem
+                            base_name = Path(csv_name).stem
                             db_path = os.path.join(base_root, base_name)
                             os.makedirs(db_path, exist_ok=True)
-                            st.write(f"📂 CSV `{cf.name}` → base `{base_name}` ({total_files_in_csv} fichiers)")
+                            st.write(f"📂 CSV `{csv_name}` → base `{base_name}` ({total_files_in_csv} fichiers)")
     
                             # Charger le CSV de tracking pour cette base
                             if base_name not in existing_entries_by_base:
@@ -1111,8 +1163,8 @@ with tab_ingest:
                 # ------------------------------------------------------------------
                 # Fin : génération / mise à jour CSV global + dashboard de synthèse
                 # ------------------------------------------------------------------
-                if not uploaded_csvs:
-                    st.warning("Aucun CSV d'ingestion uploadé.")
+                if not csv_files_to_process:
+                    st.warning("Aucun CSV d'ingestion sélectionné ou uploadé.")
                 else:
                     progress(1.0, "✅ Ingestion terminée.")
                     st.success("Ingestion terminée.")
