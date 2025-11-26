@@ -243,24 +243,46 @@ def parse_csv_groups_and_paths(file_bytes: bytes) -> Dict[str, List[str]]:
     - sinon, col0 = group, col1 = path
     - nettoyage du BOM éventuel sur 'group'
     """
-    text = file_bytes.decode("utf-8", errors="ignore")
+    # Décoder les bytes en texte, gérer BOM UTF-8
+    try:
+        text = file_bytes.decode("utf-8-sig", errors="ignore")
+    except Exception:
+        text = file_bytes.decode("utf-8", errors="ignore")
+
+    # Normaliser les sauts de ligne (Windows \r\n -> \n)
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Debug logging
+    logger.info(f"[CSV-PARSE] Bytes reçus: {len(file_bytes)}, Caractères décodés: {len(text)}")
+    lines_count = text.count('\n') + (1 if text and not text.endswith('\n') else 0)
+    logger.info(f"[CSV-PARSE] Nombre de lignes détectées: {lines_count}")
+
+    # Créer le buffer StringIO
     buf = io.StringIO(text)
 
-    sample = text[:1024]
+    # Détecter le délimiteur
+    sample = text[:2048]  # Augmenter la taille de l'échantillon
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=";,")
         delimiter = dialect.delimiter
     except Exception:
         delimiter = ";"
 
+    logger.info(f"[CSV-PARSE] Délimiteur détecté: '{delimiter}'")
+
     reader = csv.reader(buf, delimiter=delimiter)
     rows = list(reader)
+
+    logger.info(f"[CSV-PARSE] Nombre de rows parsées par csv.reader: {len(rows)}")
+
     if not rows:
         return {}
 
     header = rows[0]
     header = [h.lstrip("\ufeff") for h in header]
     header_lower = [h.strip().lower() for h in header]
+
+    logger.info(f"[CSV-PARSE] Header détecté: {header_lower}")
 
     if "group" in header_lower and "path" in header_lower:
         idx_group = header_lower.index("group")
@@ -271,17 +293,25 @@ def parse_csv_groups_and_paths(file_bytes: bytes) -> Dict[str, List[str]]:
         idx_path = 1 if len(header) > 1 else 0
         data_rows = rows
 
+    logger.info(f"[CSV-PARSE] Nombre de data rows (sans header): {len(data_rows)}")
+
     groups: Dict[str, List[str]] = {}
+    skipped_rows = 0
     for r in data_rows:
         if len(r) <= max(idx_group, idx_path):
+            skipped_rows += 1
             continue
         g = (r[idx_group] or "").strip().lstrip("\ufeff")
         p = (r[idx_path] or "").strip()
         if not p:
+            skipped_rows += 1
             continue
         if not g:
             g = "ALL"
         groups.setdefault(g, []).append(p)
+
+    total_paths = sum(len(paths) for paths in groups.values())
+    logger.info(f"[CSV-PARSE] Rows ignorées: {skipped_rows}, Total paths extraits: {total_paths}")
 
     return groups
 
@@ -768,9 +798,16 @@ with tab_ingest:
                             if len(r) < 2:
                                 continue
                             g, p = r[0].strip(), r[1].strip()
+                            # Stocker à la fois le chemin original et normalisé pour une comparaison robuste
                             entries[(g, p)] = True
+                            p_normalized = os.path.normpath(p)
+                            if p_normalized != p:
+                                entries[(g, p_normalized)] = True
+                    logger.info(f"[TRACKING] Base '{base_name}': {len(entries)} entrées de tracking (tracking CSV: {csv_path})")
                 except Exception as e:
                     st.error(f"Erreur lors de la lecture du CSV de tracking pour {base_name} : {e}")
+            else:
+                logger.info(f"[TRACKING] Base '{base_name}': Aucun CSV de tracking trouvé (nouvelle base)")
             return entries
 
         # Rien à ingérer ?
@@ -838,6 +875,9 @@ with tab_ingest:
                             cf.seek(0)
                             data = cf.read()
 
+                            # Debug: afficher la taille des données lues
+                            log(f"[CSV-READ] Fichier '{cf.name}': {len(data)} bytes lus")
+
                             # Optionnel : écriture dans un fichier temporaire (diagnostic / debug)
                             tmp_csv_path = os.path.join(csv_temp_dir, cf.name)
                             try:
@@ -850,11 +890,17 @@ with tab_ingest:
                             if not groups:
                                 st.warning(f"Aucune donnée exploitable dans le CSV {cf.name}")
                                 continue
-    
+
+                            # Debug: afficher le nombre total de fichiers trouvés dans le CSV
+                            total_files_in_csv = sum(len(paths) for paths in groups.values())
+                            log(f"[CSV-DEBUG] CSV '{cf.name}': {len(groups)} groupe(s), {total_files_in_csv} fichier(s) total")
+                            for g_name, g_paths in groups.items():
+                                log(f"[CSV-DEBUG]   Groupe '{g_name}': {len(g_paths)} fichier(s)")
+
                             base_name = Path(cf.name).stem
                             db_path = os.path.join(base_root, base_name)
                             os.makedirs(db_path, exist_ok=True)
-                            st.write(f"📂 CSV `{cf.name}` → base `{base_name}` (dossier: {db_path})")
+                            st.write(f"📂 CSV `{cf.name}` → base `{base_name}` ({total_files_in_csv} fichiers, dossier: {db_path})")
     
                             # Charger le CSV de tracking pour cette base
                             if base_name not in existing_entries_by_base:
@@ -871,8 +917,12 @@ with tab_ingest:
                                         missing_paths.append(p)
                                         ingestion_stats["csv_missing_files"] += 1
                                         continue
-                                    key = (group_name, p)
-                                    if key in existing_entries_by_base[base_name]:
+                                    # Normaliser le chemin pour la comparaison (gère / vs \ et la casse sur Windows)
+                                    p_normalized = os.path.normpath(p)
+                                    key = (group_name, p_normalized)
+                                    # Vérifier aussi avec le chemin original au cas où
+                                    key_original = (group_name, p)
+                                    if key in existing_entries_by_base[base_name] or key_original in existing_entries_by_base[base_name]:
                                         ingestion_stats["csv_skipped_existing"] += 1
                                         log(
                                             f"[SKIP] Déjà présent dans le CSV de tracking : "
@@ -880,7 +930,12 @@ with tab_ingest:
                                         )
                                         continue
                                     new_paths.append(p)
-    
+
+                                # Résumé pour ce groupe
+                                skipped_count = len(paths) - len(new_paths) - len(missing_paths)
+                                log(f"[VALIDATION] Groupe '{group_name}': {len(paths)} fichiers dans CSV, "
+                                    f"{len(new_paths)} nouveaux, {skipped_count} déjà ingérés, {len(missing_paths)} introuvables")
+
                                 if missing_paths:
                                     st.warning(
                                         f"⚠️ {len(missing_paths)} fichier(s) introuvable(s) pour "
