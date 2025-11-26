@@ -1240,6 +1240,30 @@ def open_file_callback(file_path: str):
         # Stocker l'erreur dans session_state pour l'afficher
         st.session_state['file_open_error'] = f"Impossible d'ouvrir le fichier : {e}"
 
+
+def is_llm_error_response(answer: str) -> bool:
+    """Vérifie si la réponse est un message d'erreur du LLM."""
+    if not answer:
+        return False
+    error_markers = [
+        "ERREUR DE COMMUNICATION AVEC LE LLM",
+        "Le serveur n'a pas pu répondre",
+        "Veuillez reposer votre question",
+    ]
+    return any(marker in answer for marker in error_markers)
+
+
+def display_answer_with_error_check(answer: str) -> None:
+    """Affiche la réponse avec détection d'erreur et alerte."""
+    if not answer or not answer.strip():
+        st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+    elif is_llm_error_response(answer):
+        st.error(answer)
+        st.info("💡 **Conseil**: Attendez quelques secondes puis cliquez sur 'Rechercher' à nouveau.")
+    else:
+        st.write(answer)
+
+
 def render_sources_list(
     sources: List[Dict],
     global_title: str = "Sources utilisées (triées par pertinence)",
@@ -1490,10 +1514,7 @@ with tab_rag:
                 f"### 🧠 Réponse (base=`{search_params['base']}`, collection=`{search_params['collection']}`)"
             )
             answer = result.get("answer", "")
-            if answer and answer.strip():
-                st.write(answer)
-            else:
-                st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+            display_answer_with_error_check(answer)
 
             sources = result.get("sources", [])
             sources = sorted(
@@ -1517,10 +1538,7 @@ with tab_rag:
                 f"### 🧠 Réponse synthétisée (base=`{search_params['base']}`, collections=ALL)"
             )
             answer = result.get("answer", "")
-            if answer and answer.strip():
-                st.write(answer)
-            else:
-                st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+            display_answer_with_error_check(answer)
 
             sources = result.get("sources", [])
             sources = sorted(
@@ -1545,10 +1563,7 @@ with tab_rag:
             for coll, result in all_results:
                 st.markdown(f"### 🧠 Réponse – Collection `{coll}`")
                 answer = result.get("answer", "")
-                if answer and answer.strip():
-                    st.write(answer)
-                else:
-                    st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+                display_answer_with_error_check(answer)
 
                 sources = result.get("sources", [])
                 sources = sorted(

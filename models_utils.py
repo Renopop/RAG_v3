@@ -521,7 +521,42 @@ def call_dallem_chat(
     }
 
     log.info("[RAG] Appel DALLEM /chat/completions pour réponse RAG")
-    resp = http_client.post(url, headers=headers, json=payload, timeout=180.0)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
+
+    # Retry logic avec backoff exponentiel
+    max_retries = 4
+    base_delay = 2  # secondes
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            resp = http_client.post(url, headers=headers, json=payload, timeout=180.0)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Vérifier que la réponse contient bien du contenu
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if not content:
+                raise ValueError("Réponse LLM vide")
+
+            log.info(f"[RAG] ✅ Réponse DALLEM reçue (attempt {attempt + 1}/{max_retries})")
+            return content
+
+        except Exception as e:
+            last_error = e
+            delay = base_delay * (2 ** attempt)  # 2, 4, 8, 16 secondes
+
+            if attempt < max_retries - 1:
+                log.warning(f"[RAG] ⚠️ Erreur DALLEM (attempt {attempt + 1}/{max_retries}): {e}")
+                log.info(f"[RAG] Retry dans {delay}s...")
+                time.sleep(delay)
+            else:
+                log.error(f"[RAG] ❌ Échec DALLEM après {max_retries} tentatives: {e}")
+
+    # Toutes les tentatives ont échoué - retourner un message d'erreur spécial
+    error_msg = (
+        "⚠️ **ERREUR DE COMMUNICATION AVEC LE LLM**\n\n"
+        f"Le serveur n'a pas pu répondre après {max_retries} tentatives.\n\n"
+        f"**Erreur technique:** {str(last_error)[:200]}\n\n"
+        "👉 **Veuillez reposer votre question** ou réessayer dans quelques instants."
+    )
+    return error_msg
