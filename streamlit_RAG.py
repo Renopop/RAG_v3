@@ -798,9 +798,16 @@ with tab_ingest:
                             if len(r) < 2:
                                 continue
                             g, p = r[0].strip(), r[1].strip()
+                            # Stocker à la fois le chemin original et normalisé pour une comparaison robuste
                             entries[(g, p)] = True
+                            p_normalized = os.path.normpath(p)
+                            if p_normalized != p:
+                                entries[(g, p_normalized)] = True
+                    logger.info(f"[TRACKING] Base '{base_name}': {len(entries)} entrées de tracking (tracking CSV: {csv_path})")
                 except Exception as e:
                     st.error(f"Erreur lors de la lecture du CSV de tracking pour {base_name} : {e}")
+            else:
+                logger.info(f"[TRACKING] Base '{base_name}': Aucun CSV de tracking trouvé (nouvelle base)")
             return entries
 
         # Rien à ingérer ?
@@ -910,8 +917,12 @@ with tab_ingest:
                                         missing_paths.append(p)
                                         ingestion_stats["csv_missing_files"] += 1
                                         continue
-                                    key = (group_name, p)
-                                    if key in existing_entries_by_base[base_name]:
+                                    # Normaliser le chemin pour la comparaison (gère / vs \ et la casse sur Windows)
+                                    p_normalized = os.path.normpath(p)
+                                    key = (group_name, p_normalized)
+                                    # Vérifier aussi avec le chemin original au cas où
+                                    key_original = (group_name, p)
+                                    if key in existing_entries_by_base[base_name] or key_original in existing_entries_by_base[base_name]:
                                         ingestion_stats["csv_skipped_existing"] += 1
                                         log(
                                             f"[SKIP] Déjà présent dans le CSV de tracking : "
@@ -919,7 +930,12 @@ with tab_ingest:
                                         )
                                         continue
                                     new_paths.append(p)
-    
+
+                                # Résumé pour ce groupe
+                                skipped_count = len(paths) - len(new_paths) - len(missing_paths)
+                                log(f"[VALIDATION] Groupe '{group_name}': {len(paths)} fichiers dans CSV, "
+                                    f"{len(new_paths)} nouveaux, {skipped_count} déjà ingérés, {len(missing_paths)} introuvables")
+
                                 if missing_paths:
                                     st.warning(
                                         f"⚠️ {len(missing_paths)} fichier(s) introuvable(s) pour "
