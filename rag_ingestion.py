@@ -25,7 +25,7 @@ from pdf_processing import extract_text_from_pdf, extract_attachments_from_pdf
 from docx_processing import extract_text_from_docx
 from csv_processing import extract_text_from_csv
 from xml_processing import extract_text_from_xml, XMLParseConfig
-from chunking import simple_chunk
+from chunking import simple_chunk, chunk_easa_sections
 from easa_sections import split_easa_sections
 
 logger = make_logger(debug=False)
@@ -269,49 +269,59 @@ def ingest_documents(
         base_name = os.path.basename(path)
 
         # ==============================================================
-        # CAS 1 — Sections EASA détectées
+        # CAS 1 — Sections EASA détectées → Smart Chunking
         # ==============================================================
         if sections:
             _log.info(
-                f"[INGEST] {len(sections)} EASA section(s) detected for {path}"
+                f"[INGEST] {len(sections)} EASA section(s) detected for {path} → Smart Chunking"
             )
-            for sec in sections:
-                # easa_sections.split_easa_sections() returns:
-                # { 'id': 'CS 25.613', 'kind': 'CS', 'number': '25.613',
-                #   'title': '...', 'full_text': '...' }
-                sec_id = (sec.get("id") or "").strip()
-                sec_kind = (sec.get("kind") or "").strip()
-                sec_title = (sec.get("title") or "").strip()
-                sec_text = (sec.get("full_text") or "").strip()
 
-                if not sec_text:
+            # Utiliser le smart chunking qui:
+            # - Préserve le contexte [CS xx.xxx - Title] dans chaque chunk
+            # - Ne redécoupe pas les petites sections
+            # - Fusionne les sections trop petites
+            # - Découpe intelligemment par sous-sections (a), (b), etc.
+            smart_chunks = chunk_easa_sections(
+                sections,
+                max_chunk_size=chunk_size + 500,  # +500 pour le préfixe de contexte
+                min_chunk_size=200,
+                merge_small_sections=True,
+                add_context_prefix=True,
+            )
+
+            _log.info(f"[INGEST] Smart chunking: {len(sections)} sections → {len(smart_chunks)} chunks")
+
+            for smart_chunk in smart_chunks:
+                ch = smart_chunk.get("text", "")
+                sec_id = smart_chunk.get("section_id", "")
+                sec_kind = smart_chunk.get("section_kind", "")
+                sec_title = smart_chunk.get("section_title", "")
+                chunk_idx = smart_chunk.get("chunk_index", 0)
+
+                if not ch:
                     continue
 
-                sec_chunks = simple_chunk(
-                    sec_text, chunk_size=chunk_size, overlap=150
+                # chunk_id lisible / logique
+                safe_sec_id = sec_id.replace(" ", "_").replace("|", "_") if sec_id else "no_section"
+                chunk_id = f"{base_name}_{safe_sec_id}_{chunk_idx}"
+
+                # ID réellement utilisé par FAISS (unique grâce à un uuid par chunk)
+                faiss_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
+
+                chunks.append(ch)
+                metas.append(
+                    {
+                        "source_file": base_name,
+                        "path": logical_paths.get(path, path) if logical_paths else path,
+                        "chunk_id": chunk_id,
+                        "section_id": sec_id,
+                        "section_kind": sec_kind,
+                        "section_title": sec_title,
+                        "language": language,
+                        "is_complete_section": smart_chunk.get("is_complete_section", False),
+                    }
                 )
-
-                for i, ch in enumerate(sec_chunks):
-                    # chunk_id lisible / logique
-                    safe_sec_id = sec_id.replace(" ", "_") if sec_id else "no_section"
-                    chunk_id = f"{base_name}_{safe_sec_id}_{i}"
-
-                    # ID réellement utilisé par FAISS (unique grâce à un uuid par chunk)
-                    faiss_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
-
-                    chunks.append(ch)
-                    metas.append(
-                        {
-                            "source_file": base_name,
-                            "path": logical_paths.get(path, path) if logical_paths else path,
-                            "chunk_id": chunk_id,        # pour l'UI, les logs
-                            "section_id": sec_id,        # "" si pas d'ID
-                            "section_kind": sec_kind,    # "" si vide
-                            "section_title": sec_title,  # "" si vide
-                            "language": language,        # "" si non détectée
-                        }
-                    )
-                    faiss_ids.append(faiss_id)
+                faiss_ids.append(faiss_id)
 
         # ==============================================================
         # CAS 2 — Aucune section EASA : chunking global
