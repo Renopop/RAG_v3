@@ -30,6 +30,15 @@ from models_utils import set_local_mode  # Import pour le mode test local
 from rag_ingestion import ingest_documents, build_faiss_store
 from rag_query import run_rag_query
 from feedback_store import FeedbackStore, create_feedback, QueryFeedback
+from config_manager import (
+    load_config,
+    save_config,
+    is_config_valid,
+    render_config_page_streamlit,
+    StorageConfig,
+    validate_all_directories,
+    create_directory,
+)
 from xml_processing import (
     XMLParseConfig,
     SectionPattern,
@@ -47,21 +56,35 @@ except ImportError:
 logger = make_logger(debug=False)
 
 # =====================================================================
-#  CONFIG LOCALE À PERSONNALISER
+#  CONFIG LOCALE - CHARGÉE DEPUIS config.json
 # =====================================================================
-# ⚠ IMPORTANT :
-#    - BASE_ROOT_DIR : chemin ABSOLU vers le dossier racine des bases FAISS
-#    - CSV_IMPORT_DIR : chemin ABSOLU vers le dossier où écrire les CSV d'ingestion
-#    - CSV_EXPORT_DIR : chemin ABSOLU vers le dossier où écrire les CSV de tracking
+# La configuration est maintenant gérée par config_manager.py
+# Si les répertoires ne sont pas accessibles, une page de configuration
+# sera affichée pour permettre à l'utilisateur de les configurer.
 
-# Chemins FAISS sur partage réseau (SANS ESPACES pour compatibilité FAISS C++)
-BASE_ROOT_DIR = r"N:\DA\SOC\RDA\ORG\DGT\POLE-SYSTEME\ENERGIE\RESERVE\PROP\Knowledge\IA_PROP\FAISS_DATABASE\BaseDB"
-CSV_IMPORT_DIR = r"N:\DA\SOC\RDA\ORG\DGT\POLE-SYSTEME\ENERGIE\RESERVE\PROP\Knowledge\IA_PROP\FAISS_DATABASE\CSV_Ingestion"
-CSV_EXPORT_DIR = r"N:\DA\SOC\RDA\ORG\DGT\POLE-SYSTEME\ENERGIE\RESERVE\PROP\Knowledge\IA_PROP\FAISS_DATABASE\Fichiers_Tracking_CSV"
-FEEDBACK_DIR = r"N:\DA\SOC\RDA\ORG\DGT\POLE-SYSTEME\ENERGIE\RESERVE\PROP\Knowledge\IA_PROP\FAISS_DATABASE\Feedbacks"
+# Charger la configuration
+_config = load_config()
 
-# Initialisation du store de feedbacks
-feedback_store = FeedbackStore(FEEDBACK_DIR)
+# Variables globales pour compatibilité avec le code existant
+BASE_ROOT_DIR = _config.base_root_dir
+CSV_IMPORT_DIR = _config.csv_import_dir
+CSV_EXPORT_DIR = _config.csv_export_dir
+FEEDBACK_DIR = _config.feedback_dir
+
+
+def _init_feedback_store():
+    """Initialise le store de feedbacks de manière sécurisée."""
+    try:
+        if os.path.exists(FEEDBACK_DIR) or os.access(os.path.dirname(FEEDBACK_DIR), os.W_OK):
+            os.makedirs(FEEDBACK_DIR, exist_ok=True)
+            return FeedbackStore(FEEDBACK_DIR)
+    except Exception as e:
+        logger.warning(f"[CONFIG] Impossible d'initialiser le feedback store: {e}")
+    return None
+
+
+# Initialisation du store de feedbacks (peut être None si répertoire inaccessible)
+feedback_store = _init_feedback_store()
 
 
 
@@ -304,6 +327,90 @@ st.set_page_config(
     page_title="RaGME_UP - PROP",
     layout="wide",
 )
+
+# ========================
+#   VÉRIFICATION DE LA CONFIGURATION
+# ========================
+# Si les répertoires ne sont pas accessibles, afficher la page de configuration
+
+if not is_config_valid(_config):
+    st.title("Configuration des répertoires")
+
+    st.warning("Les répertoires de stockage ne sont pas accessibles. Veuillez les configurer.")
+
+    # Afficher le statut de chaque répertoire
+    results = validate_all_directories(_config)
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Statut des répertoires")
+
+        for key, (valid, message, label, path) in results.items():
+            if valid:
+                st.success(f"✅ **{label}**\n\n`{path}`")
+            else:
+                st.error(f"❌ **{label}**\n\n`{path}`\n\n_{message}_")
+
+    with col2:
+        st.subheader("Actions")
+
+        # Bouton pour créer les répertoires manquants
+        if st.button("Créer les répertoires manquants", type="primary"):
+            created = []
+            failed = []
+
+            for key, (valid, message, label, path) in results.items():
+                if not valid:
+                    success, msg = create_directory(path)
+                    if success:
+                        created.append(label)
+                    else:
+                        failed.append(f"{label}: {msg}")
+
+            if created:
+                st.success(f"Créés: {', '.join(created)}")
+            if failed:
+                st.error(f"Échecs: {', '.join(failed)}")
+
+            st.rerun()
+
+        st.markdown("---")
+
+        # Formulaire pour modifier les chemins
+        st.subheader("Modifier les chemins")
+
+        new_base_root = st.text_input("Bases FAISS", value=_config.base_root_dir)
+        new_csv_import = st.text_input("CSV ingestion", value=_config.csv_import_dir)
+        new_csv_export = st.text_input("CSV tracking", value=_config.csv_export_dir)
+        new_feedback = st.text_input("Feedbacks", value=_config.feedback_dir)
+
+        if st.button("Sauvegarder la configuration"):
+            new_config = StorageConfig(
+                base_root_dir=new_base_root,
+                csv_import_dir=new_csv_import,
+                csv_export_dir=new_csv_export,
+                feedback_dir=new_feedback,
+            )
+            if save_config(new_config):
+                st.success("Configuration sauvegardée!")
+                st.rerun()
+            else:
+                st.error("Erreur lors de la sauvegarde")
+
+    st.info("""
+    **Aide:**
+    - Les chemins doivent être des chemins absolus
+    - Les répertoires doivent être accessibles en lecture et écriture
+    - Cliquez sur "Créer les répertoires manquants" pour créer les dossiers automatiquement
+    - Ou modifiez les chemins et cliquez sur "Sauvegarder la configuration"
+    """)
+
+    st.stop()  # Arrêter l'exécution du reste de l'app
+
+# ========================
+#   APPLICATION PRINCIPALE
+# ========================
 
 st.title("RaGME_UP - PROP")
 
