@@ -44,6 +44,19 @@ except ImportError:
     BGE_RERANKER_AVAILABLE = False
     KEYWORD_FILTER_AVAILABLE = False
 
+# Import des fonctions de context expansion et cross-references
+try:
+    from chunking import (
+        extract_cross_references,
+        add_cross_references_to_chunk,
+        get_related_chunks_by_reference,
+        expand_chunk_context,
+        get_neighboring_chunks,
+    )
+    CONTEXT_EXPANSION_AVAILABLE = True
+except ImportError:
+    CONTEXT_EXPANSION_AVAILABLE = False
+
 logger = make_logger(debug=False)
 
 
@@ -79,6 +92,7 @@ def _run_rag_query_single_collection(
     use_query_expansion: bool = True,
     num_query_variations: int = 3,
     use_bge_reranker: bool = True,
+    use_context_expansion: bool = True,
 ) -> Dict[str, Any]:
     """
     RAG sur une seule collection.
@@ -89,6 +103,7 @@ def _run_rag_query_single_collection(
       basé sur les feedbacks utilisateurs
     - Si use_query_expansion=True : génère des variations de la question et fusionne les résultats
     - Si use_bge_reranker=True : applique le reranking BGE après la recherche initiale
+    - Si use_context_expansion=True : enrichit les chunks avec contexte voisin et références
     """
     _log = log or logger
 
@@ -311,6 +326,73 @@ def _run_rag_query_single_collection(
         except Exception as e:
             _log.warning(f"[RAG] Keyword filtering failed: {e}")
 
+    # ========== CONTEXT EXPANSION (Cross-References + Neighbors) ==========
+    if use_context_expansion and CONTEXT_EXPANSION_AVAILABLE:
+        _log.info("[RAG] 🔗 Applying context expansion...")
+        try:
+            expanded_context_blocks = []
+            seen_chunks = set()  # Pour éviter les doublons
+
+            for src in sources[:15]:  # Limiter aux 15 premiers pour performance
+                chunk_id = src.get("chunk_id", "")
+                if chunk_id in seen_chunks:
+                    continue
+                seen_chunks.add(chunk_id)
+
+                # Extraire les références croisées du chunk
+                refs = extract_cross_references(src.get("text", ""))
+                ref_ids = [r["ref_id"] for r in refs if r["ref_type"] in ("CS", "AMC", "GM")]
+
+                # Construire le bloc de contexte principal
+                main_header = (
+                    f"[source={src['source_file']}, chunk={chunk_id}, "
+                    f"score={src.get('score', 0):.3f}]"
+                )
+                main_block = f"{main_header}\n{src['text']}"
+
+                # Ajouter les références détectées aux métadonnées
+                if ref_ids:
+                    src["references_to"] = ref_ids[:5]  # Max 5 références
+                    _log.debug(f"[RAG] Chunk {chunk_id} references: {ref_ids[:5]}")
+
+                expanded_context_blocks.append(main_block)
+
+            # Chercher les chunks référencés dans les autres sources
+            referenced_chunks = []
+            all_refs = set()
+
+            for src in sources[:15]:
+                refs_to = src.get("references_to", [])
+                for ref in refs_to:
+                    ref_normalized = ref.upper().replace(" ", "").replace("-", "")
+                    all_refs.add(ref_normalized)
+
+            # Trouver les chunks qui correspondent aux références
+            if all_refs:
+                for src in sources:
+                    section_id = src.get("section_id", "")
+                    if section_id:
+                        section_normalized = section_id.upper().replace(" ", "").replace("-", "")
+                        if section_normalized in all_refs and src.get("chunk_id") not in seen_chunks:
+                            referenced_chunks.append(src)
+                            seen_chunks.add(src.get("chunk_id"))
+
+                # Ajouter les chunks référencés au contexte
+                if referenced_chunks:
+                    _log.info(f"[RAG] Adding {len(referenced_chunks)} referenced chunk(s) to context")
+                    for ref_src in referenced_chunks[:5]:  # Max 5 chunks référencés
+                        ref_header = (
+                            f"[REFERENCED: source={ref_src['source_file']}, "
+                            f"section={ref_src.get('section_id', '?')}]"
+                        )
+                        expanded_context_blocks.append(f"{ref_header}\n{ref_src['text']}")
+
+            context_blocks = expanded_context_blocks
+            _log.info(f"[RAG] ✅ Context expansion applied ({len(context_blocks)} blocks)")
+
+        except Exception as e:
+            _log.warning(f"[RAG] Context expansion failed: {e}")
+
     full_context = "\n\n".join(context_blocks)
 
     if not call_llm:
@@ -355,6 +437,7 @@ def run_rag_query(
     use_query_expansion: bool = True,
     num_query_variations: int = 3,
     use_bge_reranker: bool = True,
+    use_context_expansion: bool = True,
 ) -> Dict[str, Any]:
     """
     RAG "haut niveau" :
@@ -376,6 +459,7 @@ def run_rag_query(
     - use_query_expansion : génère des variations de la question pour améliorer le recall
     - num_query_variations : nombre de variations à générer (défaut: 3)
     - use_bge_reranker : applique le reranking BGE après la recherche (défaut: True)
+    - use_context_expansion : enrichit les résultats avec contexte et références (défaut: True)
 
     Options de re-ranking basé sur les feedbacks :
     - feedback_store : instance de FeedbackStore pour accéder aux feedbacks
@@ -429,6 +513,7 @@ def run_rag_query(
                     use_query_expansion=use_query_expansion,
                     num_query_variations=num_query_variations,
                     use_bge_reranker=use_bge_reranker,
+                    use_context_expansion=use_context_expansion,
                 )
             except Exception as e:
                 _log.error(
@@ -490,4 +575,5 @@ def run_rag_query(
         use_query_expansion=use_query_expansion,
         num_query_variations=num_query_variations,
         use_bge_reranker=use_bge_reranker,
+        use_context_expansion=use_context_expansion,
     )

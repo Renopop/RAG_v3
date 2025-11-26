@@ -25,7 +25,17 @@ from pdf_processing import extract_text_from_pdf, extract_attachments_from_pdf
 from docx_processing import extract_text_from_docx
 from csv_processing import extract_text_from_csv
 from xml_processing import extract_text_from_xml, XMLParseConfig
-from chunking import simple_chunk, chunk_easa_sections
+from chunking import (
+    simple_chunk,
+    chunk_easa_sections,
+    smart_chunk_generic,
+    adaptive_chunk_document,
+    augment_chunks,
+    _calculate_content_density,
+    _get_adaptive_chunk_size,
+    add_cross_references_to_chunks,
+    extract_cross_references,
+)
 from easa_sections import split_easa_sections
 
 logger = make_logger(debug=False)
@@ -269,27 +279,53 @@ def ingest_documents(
         base_name = os.path.basename(path)
 
         # ==============================================================
-        # CAS 1 — Sections EASA détectées → Smart Chunking
+        # CAS 1 — Sections EASA détectées → Smart Chunking Adaptatif
         # ==============================================================
         if sections:
             _log.info(
-                f"[INGEST] {len(sections)} EASA section(s) detected for {path} → Smart Chunking"
+                f"[INGEST] {len(sections)} EASA section(s) detected for {path} → Adaptive Smart Chunking"
             )
 
-            # Utiliser le smart chunking qui:
+            # Analyser la densité du document pour adapter la taille des chunks
+            density_info = _calculate_content_density(text)
+            adapted_chunk_size = _get_adaptive_chunk_size(
+                text,
+                base_size=chunk_size,
+                min_size=600,
+                max_size=2000
+            )
+
+            _log.info(
+                f"[INGEST] Content density: {density_info['density_type']} "
+                f"(score={density_info['density_score']:.2f}) → chunk_size={adapted_chunk_size}"
+            )
+
+            # Utiliser le smart chunking adaptatif qui:
             # - Préserve le contexte [CS xx.xxx - Title] dans chaque chunk
             # - Ne redécoupe pas les petites sections
             # - Fusionne les sections trop petites
             # - Découpe intelligemment par sous-sections (a), (b), etc.
+            # - Adapte la taille selon la densité du contenu
             smart_chunks = chunk_easa_sections(
                 sections,
-                max_chunk_size=chunk_size + 500,  # +500 pour le préfixe de contexte
+                max_chunk_size=adapted_chunk_size + 500,  # +500 pour le préfixe de contexte
                 min_chunk_size=200,
                 merge_small_sections=True,
                 add_context_prefix=True,
             )
 
-            _log.info(f"[INGEST] Smart chunking: {len(sections)} sections → {len(smart_chunks)} chunks")
+            # Augmenter les chunks avec mots-clés et métadonnées
+            smart_chunks = augment_chunks(
+                smart_chunks,
+                add_keywords=True,
+                add_key_phrases=True,
+                add_density_info=True,
+            )
+
+            # Ajouter les cross-références (liens vers autres sections)
+            smart_chunks = add_cross_references_to_chunks(smart_chunks)
+
+            _log.info(f"[INGEST] Adaptive chunking: {len(sections)} sections → {len(smart_chunks)} augmented chunks")
 
             for smart_chunk in smart_chunks:
                 ch = smart_chunk.get("text", "")
@@ -297,6 +333,12 @@ def ingest_documents(
                 sec_kind = smart_chunk.get("section_kind", "")
                 sec_title = smart_chunk.get("section_title", "")
                 chunk_idx = smart_chunk.get("chunk_index", 0)
+
+                # Données d'augmentation
+                keywords = smart_chunk.get("keywords", [])
+                density_type = smart_chunk.get("density_type", "")
+                density_score = smart_chunk.get("density_score", 0)
+                references_to = smart_chunk.get("references_to", [])
 
                 if not ch:
                     continue
@@ -319,21 +361,84 @@ def ingest_documents(
                         "section_title": sec_title,
                         "language": language,
                         "is_complete_section": smart_chunk.get("is_complete_section", False),
+                        # Métadonnées d'augmentation
+                        "keywords": keywords[:10] if keywords else [],
+                        "density_type": density_type,
+                        "density_score": density_score,
+                        # Cross-références vers d'autres sections
+                        "references_to": references_to[:5] if references_to else [],
                     }
                 )
                 faiss_ids.append(faiss_id)
 
         # ==============================================================
-        # CAS 2 — Aucune section EASA : chunking global
+        # CAS 2 — Aucune section EASA : Chunking Adaptatif Automatique
         # ==============================================================
         else:
             _log.info(
-                f"[INGEST] No EASA sections detected → global chunking for {path}"
+                f"[INGEST] No EASA sections detected → Adaptive Automatic Chunking for {path}"
             )
-            raw_chunks = simple_chunk(text, chunk_size=chunk_size, overlap=150)
 
-            for i, ch in enumerate(raw_chunks):
-                chunk_id = f"{base_name}_chunk_{i}"
+            # Analyser la densité du document pour adapter la taille des chunks
+            density_info = _calculate_content_density(text)
+            adapted_chunk_size = _get_adaptive_chunk_size(
+                text,
+                base_size=chunk_size,
+                min_size=600,
+                max_size=2000
+            )
+
+            _log.info(
+                f"[INGEST] Content density: {density_info['density_type']} "
+                f"(score={density_info['density_score']:.2f}) → chunk_size={adapted_chunk_size}"
+            )
+
+            # Utiliser le smart chunking générique adaptatif qui:
+            # - Détecte les titres/headers et les garde avec leur contenu
+            # - Préserve les listes (ne coupe pas au milieu)
+            # - Coupe aux fins de phrases
+            # - Ajoute le contexte source [Source: filename]
+            # - Respecte la structure du document
+            # - Adapte la taille selon la densité
+            smart_chunks = smart_chunk_generic(
+                text,
+                source_file=base_name,
+                chunk_size=adapted_chunk_size + 300,  # +300 pour les préfixes
+                min_chunk_size=200,
+                overlap=100,
+                add_source_prefix=True,
+                preserve_lists=True,
+                preserve_headers=True,
+            )
+
+            # Augmenter les chunks avec mots-clés et métadonnées
+            smart_chunks = augment_chunks(
+                smart_chunks,
+                add_keywords=True,
+                add_key_phrases=True,
+                add_density_info=True,
+            )
+
+            # Ajouter les cross-références (liens vers autres sections)
+            smart_chunks = add_cross_references_to_chunks(smart_chunks)
+
+            _log.info(f"[INGEST] Adaptive generic chunking: {len(smart_chunks)} augmented chunks")
+
+            for smart_chunk in smart_chunks:
+                ch = smart_chunk.get("text", "")
+                chunk_idx = smart_chunk.get("chunk_index", 0)
+                header = smart_chunk.get("header", "")
+
+                # Données d'augmentation
+                keywords = smart_chunk.get("keywords", [])
+                density_type = smart_chunk.get("density_type", "")
+                density_score = smart_chunk.get("density_score", 0)
+                references_to = smart_chunk.get("references_to", [])
+
+                if not ch:
+                    continue
+
+                chunk_id = f"{base_name}_chunk_{chunk_idx}"
                 faiss_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
 
                 chunks.append(ch)
@@ -342,10 +447,16 @@ def ingest_documents(
                         "source_file": base_name,
                         "path": logical_paths.get(path, path) if logical_paths else path,
                         "chunk_id": chunk_id,
-                        "section_id": "",          # surtout pas None
-                        "section_kind": "",
-                        "section_title": "",
-                        "language": language,      # "" si non détectée
+                        "section_id": header[:50] if header else "",  # Utiliser le header détecté
+                        "section_kind": smart_chunk.get("type", ""),
+                        "section_title": header if header else "",
+                        "language": language,
+                        # Métadonnées d'augmentation
+                        "keywords": keywords[:10] if keywords else [],
+                        "density_type": density_type,
+                        "density_score": density_score,
+                        # Cross-références vers d'autres sections
+                        "references_to": references_to[:5] if references_to else [],
                     }
                 )
                 faiss_ids.append(faiss_id)
