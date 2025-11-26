@@ -39,16 +39,24 @@ def get_local_embedding_model():
     if _local_embedding_model is None and LOCAL_EMBEDDING_PATH:
         try:
             from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise RuntimeError(
+                "sentence-transformers non installé. Installez-le avec:\n"
+                "  pip install sentence-transformers transformers torch"
+            )
+        try:
             import torch
-
+        except ImportError:
+            raise RuntimeError(
+                "torch non installé. Installez-le avec:\n"
+                "  pip install torch\n"
+                "Pour CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu121"
+            )
+        try:
             # Détection automatique du device (CUDA si disponible)
             device = "cuda" if torch.cuda.is_available() else "cpu"
             _local_embedding_model = SentenceTransformer(LOCAL_EMBEDDING_PATH, device=device)
             print(f"✅ Modèle d'embedding local chargé: {LOCAL_EMBEDDING_PATH} (device: {device})")
-        except ImportError:
-            raise RuntimeError(
-                "sentence-transformers non installé. Installez-le avec: pip install sentence-transformers"
-            )
         except Exception as e:
             raise RuntimeError(f"Erreur lors du chargement du modèle d'embedding: {e}")
     return _local_embedding_model
