@@ -287,10 +287,10 @@ Décompose cette question si elle contient plusieurs aspects:"""
 
 
 # =====================================================================
-#  BGE RERANKER
+#  BGE RERANKER (Local ou API)
 # =====================================================================
 
-# Configuration du reranker BGE
+# Configuration du reranker BGE (API)
 BGE_RERANKER_API_BASE = "https://api.dev.dassault-aviation.pro/bge-reranker-v2-m3/v1/"
 BGE_RERANKER_ENDPOINT = "rerank"
 BGE_RERANKER_API_KEY = "EMPTY"  # Peut être configuré si nécessaire
@@ -304,7 +304,7 @@ def rerank_with_bge(
     log=None
 ) -> List[Dict[str, Any]]:
     """
-    Rerank les documents en utilisant le modèle BGE Reranker V2 M3.
+    Rerank les documents en utilisant le modèle BGE Reranker (local ou API).
 
     Args:
         query: La question/requête
@@ -321,7 +321,30 @@ def rerank_with_bge(
     if not documents:
         return []
 
-    _log.info(f"[RERANK] Reranking {len(documents)} documents avec BGE Reranker...")
+    # Vérifier si un reranker local est disponible
+    try:
+        from models_utils import LOCAL_RERANKER_PATH, rerank_local
+        if LOCAL_RERANKER_PATH:
+            _log.info(f"[RERANK] Reranking {len(documents)} documents avec modèle LOCAL...")
+            try:
+                results = rerank_local(query, documents, top_k)
+                # Formater pour compatibilité avec le reste du code
+                reranked = []
+                for r in results:
+                    reranked.append({
+                        "index": r["index"],
+                        "score": r["score"],
+                        "document": r.get("text", documents[r["index"]] if r["index"] < len(documents) else "")
+                    })
+                _log.info(f"[RERANK] ✅ Reranking LOCAL terminé. Top score: {reranked[0]['score']:.3f}" if reranked else "[RERANK] ✅ Reranking terminé")
+                return reranked
+            except Exception as e:
+                _log.warning(f"[RERANK] ⚠️ Reranker local échoué, fallback vers API: {e}")
+    except ImportError:
+        pass
+
+    # Fallback vers l'API
+    _log.info(f"[RERANK] Reranking {len(documents)} documents avec BGE Reranker API...")
 
     url = f"{BGE_RERANKER_API_BASE}{BGE_RERANKER_ENDPOINT}"
     headers = {
@@ -369,7 +392,7 @@ def rerank_with_bge(
         if top_k:
             reranked = reranked[:top_k]
 
-        _log.info(f"[RERANK] ✅ Reranking terminé. Top score: {reranked[0]['score']:.3f}" if reranked else "[RERANK] ✅ Reranking terminé")
+        _log.info(f"[RERANK] ✅ Reranking API terminé. Top score: {reranked[0]['score']:.3f}" if reranked else "[RERANK] ✅ Reranking terminé")
 
         return reranked
 
