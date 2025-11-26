@@ -430,3 +430,212 @@ def apply_reranking_to_sources(
     _log.info(f"[RERANK] {len(reranked_sources)} sources reordonnées")
 
     return reranked_sources
+
+
+# =====================================================================
+#  KEYWORD EXTRACTION & FILTERING
+# =====================================================================
+
+# Mots vides français et anglais à ignorer
+STOPWORDS = {
+    # Français
+    "le", "la", "les", "un", "une", "des", "de", "du", "au", "aux",
+    "ce", "cette", "ces", "mon", "ma", "mes", "ton", "ta", "tes",
+    "son", "sa", "ses", "notre", "nos", "votre", "vos", "leur", "leurs",
+    "je", "tu", "il", "elle", "on", "nous", "vous", "ils", "elles",
+    "qui", "que", "quoi", "dont", "où", "quel", "quelle", "quels", "quelles",
+    "et", "ou", "mais", "donc", "car", "ni", "or",
+    "dans", "sur", "sous", "avec", "sans", "pour", "par", "en", "vers",
+    "est", "sont", "être", "avoir", "fait", "faire", "peut", "doit",
+    "a", "ai", "as", "avons", "avez", "ont",
+    "ne", "pas", "plus", "moins", "très", "bien", "aussi",
+    "comment", "pourquoi", "quand", "combien",
+    # Anglais
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
+    "may", "might", "must", "shall", "can",
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+    "my", "your", "his", "its", "our", "their",
+    "this", "that", "these", "those",
+    "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
+    "and", "or", "but", "if", "then", "else", "so", "because",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "about",
+    "not", "no", "yes", "all", "any", "some", "each", "every",
+}
+
+
+def extract_keywords(
+    question: str,
+    min_length: int = 3,
+    log=None
+) -> List[str]:
+    """
+    Extrait les mots-clés importants d'une question.
+
+    Méthode simple sans dépendances:
+    - Tokenisation basique
+    - Suppression des stopwords
+    - Garde les mots de longueur suffisante
+    - Conserve les codes techniques (CS 25.xxx, AMC, etc.)
+
+    Args:
+        question: La question à analyser
+        min_length: Longueur minimum des mots à garder
+        log: Logger optionnel
+
+    Returns:
+        Liste des mots-clés extraits
+    """
+    _log = log or logger
+    import re
+
+    # Normaliser la question
+    text = question.lower()
+
+    # Extraire d'abord les codes techniques (CS 25.xxx, AMC xx.xxx, etc.)
+    technical_codes = re.findall(
+        r'\b(?:cs|amc|gm|cs-e|cs-apu|cs-25|cs-23|cs-27|cs-29)[\s\-]?\d+(?:\.\d+)*\b',
+        text,
+        re.IGNORECASE
+    )
+    # Normaliser les codes techniques
+    technical_codes = [code.upper().replace(" ", "-") for code in technical_codes]
+
+    # Tokeniser (garder lettres, chiffres, tirets)
+    tokens = re.findall(r'[a-zA-ZÀ-ÿ0-9\-]+', text)
+
+    # Filtrer
+    keywords = []
+    for token in tokens:
+        token_lower = token.lower()
+        # Ignorer stopwords
+        if token_lower in STOPWORDS:
+            continue
+        # Ignorer mots trop courts (sauf si c'est un nombre/code)
+        if len(token) < min_length and not token.isdigit():
+            continue
+        # Garder le mot
+        keywords.append(token_lower)
+
+    # Ajouter les codes techniques au début (prioritaires)
+    all_keywords = technical_codes + [k for k in keywords if k.upper() not in technical_codes]
+
+    # Dédupliquer en préservant l'ordre
+    seen = set()
+    unique_keywords = []
+    for kw in all_keywords:
+        kw_lower = kw.lower()
+        if kw_lower not in seen:
+            seen.add(kw_lower)
+            unique_keywords.append(kw)
+
+    _log.info(f"[KEYWORDS] Extraits: {unique_keywords[:10]}{'...' if len(unique_keywords) > 10 else ''}")
+
+    return unique_keywords
+
+
+def filter_sources_by_keywords(
+    sources: List[Dict[str, Any]],
+    keywords: List[str],
+    min_matches: int = 1,
+    log=None
+) -> List[Dict[str, Any]]:
+    """
+    Filtre les sources qui contiennent au moins N mots-clés.
+
+    Args:
+        sources: Liste des sources avec leur texte
+        keywords: Liste des mots-clés à rechercher
+        min_matches: Nombre minimum de mots-clés requis
+        log: Logger optionnel
+
+    Returns:
+        Sources filtrées avec un champ 'keyword_matches' ajouté
+    """
+    _log = log or logger
+
+    if not keywords:
+        _log.warning("[KEYWORDS] Aucun mot-clé fourni, pas de filtrage")
+        return sources
+
+    if not sources:
+        return sources
+
+    filtered = []
+
+    for src in sources:
+        text = src.get("text", "").lower()
+
+        # Compter les mots-clés trouvés
+        matches = []
+        for kw in keywords:
+            kw_lower = kw.lower()
+            if kw_lower in text:
+                matches.append(kw)
+
+        if len(matches) >= min_matches:
+            src_copy = src.copy()
+            src_copy["keyword_matches"] = matches
+            src_copy["keyword_count"] = len(matches)
+            filtered.append(src_copy)
+
+    _log.info(f"[KEYWORDS] Filtrage: {len(filtered)}/{len(sources)} sources retenues (min {min_matches} mot-clé)")
+
+    # Si le filtrage est trop strict et élimine tout, garder les originaux
+    if not filtered and sources:
+        _log.warning("[KEYWORDS] Filtrage trop strict, conservation des sources originales")
+        return sources
+
+    return filtered
+
+
+def boost_sources_by_keywords(
+    sources: List[Dict[str, Any]],
+    keywords: List[str],
+    boost_factor: float = 0.1,
+    log=None
+) -> List[Dict[str, Any]]:
+    """
+    Booste le score des sources en fonction du nombre de mots-clés trouvés.
+    Alternative au filtrage strict.
+
+    Args:
+        sources: Liste des sources
+        keywords: Liste des mots-clés
+        boost_factor: Facteur de boost par mot-clé trouvé
+        log: Logger optionnel
+
+    Returns:
+        Sources avec scores ajustés et triées par score décroissant
+    """
+    _log = log or logger
+
+    if not keywords or not sources:
+        return sources
+
+    boosted = []
+
+    for src in sources:
+        text = src.get("text", "").lower()
+        src_copy = src.copy()
+
+        # Compter les mots-clés
+        matches = [kw for kw in keywords if kw.lower() in text]
+        match_count = len(matches)
+
+        # Appliquer le boost
+        original_score = src_copy.get("score", 0.5)
+        boost = boost_factor * match_count
+        src_copy["score"] = min(1.0, original_score + boost)
+        src_copy["keyword_matches"] = matches
+        src_copy["keyword_boost"] = boost
+
+        boosted.append(src_copy)
+
+    # Trier par score décroissant
+    boosted.sort(key=lambda x: x["score"], reverse=True)
+
+    _log.info(f"[KEYWORDS] Boost appliqué: max {max(s.get('keyword_boost', 0) for s in boosted):.2f}")
+
+    return boosted
+
