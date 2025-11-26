@@ -49,6 +49,165 @@ L'application s'ouvre automatiquement dans votre navigateur sur `http://localhos
 
 ---
 
+## 🧩 Système de Chunking Avancé
+
+Le système RAG utilise un **chunking adaptatif intelligent** qui s'adapte automatiquement au type de document et à la densité du contenu.
+
+### Détection automatique du type de document
+
+| Type de document | Détection | Stratégie appliquée |
+|------------------|-----------|---------------------|
+| **Documents EASA** | Headers `CS 25.xxx`, `AMC`, `GM` | Chunking par sections réglementaires |
+| **Documents génériques** | Tout autre document | Smart chunking avec préservation de structure |
+
+### Techniques de chunking implémentées
+
+#### 1. 📊 Analyse de densité du contenu
+
+Le système analyse automatiquement chaque document pour détecter sa densité :
+
+| Densité | Caractéristiques | Taille chunk |
+|---------|------------------|--------------|
+| **very_dense** | Code, formules, tableaux, nombreuses références | 800 chars |
+| **dense** | Texte technique, spécifications, listes | 1200 chars |
+| **normal** | Texte standard, prose technique | 1500 chars |
+| **sparse** | Narratif, introductions, descriptions | 2000 chars |
+
+**Métriques analysées :**
+- Densité de termes techniques (80+ mots-clés aéronautiques)
+- Ratio nombres/formules
+- Longueur moyenne des phrases
+- Présence de listes et tableaux
+- Densité de références (CS, AMC, GM, FAR, JAR)
+- Ratio d'acronymes
+
+#### 2. ✈️ Chunking EASA spécialisé
+
+Pour les documents réglementaires EASA (CS-25, CS-E, etc.) :
+
+```
+[CS 25.571 - Damage tolerance and fatigue evaluation of structure]
+The evaluation... (contenu de la section)
+```
+
+**Fonctionnalités :**
+- Détection des sections par regex : `CS`, `AMC`, `GM`, `CS-E`, `CS-APU`
+- Préservation du contexte `[Section ID - Title]` dans chaque chunk
+- Découpage intelligent par sous-paragraphes `(a)`, `(b)`, `(1)`, `(2)`
+- Fusion automatique des petites sections (<300 chars)
+- Pas de redécoupage des sections déjà petites
+
+#### 3. 📄 Smart chunking générique
+
+Pour les documents non-EASA :
+
+- **Préservation des headers** : Les titres restent avec leur contenu
+- **Préservation des listes** : Ne coupe jamais au milieu d'une liste
+- **Coupure aux phrases** : Respecte les fins de phrases
+- **Contexte source** : Ajoute `[Source: filename]` pour traçabilité
+- **Overlap configurable** : Chevauchement pour garder le contexte
+
+#### 4. 🏷️ Augmentation des chunks
+
+Chaque chunk est enrichi avec des métadonnées pour améliorer la recherche :
+
+```python
+{
+    "text": "...",                    # Contenu du chunk
+    "keywords": ["fatigue", "CS 25.571", "structure"],  # Mots-clés extraits
+    "key_phrases": ["shall be evaluated..."],           # Phrases clés (exigences)
+    "density_type": "dense",          # Type de densité
+    "density_score": 0.45,            # Score de densité
+    "references_to": ["CS 25.573", "AMC 25.571"]       # Références détectées
+}
+```
+
+**Extraction de mots-clés :**
+- Filtrage des stopwords (FR + EN)
+- Bonus pour termes techniques aéronautiques
+- Extraction des codes de référence (CS, AMC, GM)
+
+#### 5. 🔗 Détection des références croisées
+
+Le système détecte automatiquement les liens entre sections :
+
+**Patterns détectés :**
+- Références directes : `CS 25.571`, `AMC 25.1309`, `GM 25.631`
+- Références contextuelles : `see CS 25.571`, `refer to AMC...`, `in accordance with...`
+- Références FAR/JAR : `FAR 25.571`, `JAR 25.571`
+- Références internes : `paragraph (a)`, `sub-paragraph (1)`
+
+**Stockage :**
+```python
+chunk["references_to"] = ["CS 25.573", "AMC 25.571"]  # Max 5 références
+```
+
+#### 6. 🔍 Expansion de contexte (Query-Time)
+
+Lors de la recherche, le système enrichit automatiquement les résultats :
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| **Chunks voisins** | Ajoute les chunks précédent/suivant du même fichier |
+| **Chunks référencés** | Si un chunk mentionne `CS 25.573`, inclut les chunks de cette section |
+| **Index inversé** | Lookup rapide des chunks par référence |
+
+**Activation :** `use_context_expansion=True` (par défaut)
+
+### Architecture du chunking
+
+```
+Document
+    │
+    ▼
+┌─────────────────────────────┐
+│  Détection type document    │
+│  (EASA vs Générique)        │
+└──────────────┬──────────────┘
+               │
+    ┌──────────┴──────────┐
+    │                     │
+    ▼                     ▼
+┌─────────────┐    ┌─────────────┐
+│ EASA Parser │    │ Smart Chunk │
+│ (sections)  │    │ (generic)   │
+└──────┬──────┘    └──────┬──────┘
+       │                  │
+       └────────┬─────────┘
+                │
+                ▼
+┌─────────────────────────────┐
+│  Analyse densité contenu    │
+│  → Adaptation taille chunks │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│     Augmentation chunks     │
+│  (keywords, key_phrases)    │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│  Détection cross-références │
+│  (CS, AMC, GM, FAR, JAR)    │
+└──────────────┬──────────────┘
+               │
+               ▼
+        Chunks indexés
+```
+
+### Fichiers concernés
+
+| Fichier | Rôle |
+|---------|------|
+| `chunking.py` | Toutes les fonctions de chunking et augmentation |
+| `easa_sections.py` | Parser de sections EASA (CS/AMC/GM) |
+| `rag_ingestion.py` | Orchestration du chunking lors de l'ingestion |
+| `rag_query.py` | Context expansion lors des requêtes |
+
+---
+
 ## 📋 Prérequis
 
 - Python 3.8 ou supérieur
@@ -66,5 +225,5 @@ Consultez la documentation pour toute question :
 
 ---
 
-**Version:** 1.1
-**Dernière mise à jour:** 2025-01-24
+**Version:** 1.2
+**Dernière mise à jour:** 2025-11-26
