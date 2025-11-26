@@ -878,6 +878,13 @@ with tab_ingest:
                             # Debug: afficher la taille des données lues
                             log(f"[CSV-READ] Fichier '{cf.name}': {len(data)} bytes lus")
 
+                            # Debug VERBOSE: afficher les premières lignes du CSV brut
+                            try:
+                                raw_preview = data[:1000].decode('utf-8', errors='replace')
+                                log(f"[CSV-RAW] Aperçu du contenu brut (premiers 1000 chars):\n{raw_preview}")
+                            except:
+                                log(f"[CSV-RAW] Impossible de décoder l'aperçu")
+
                             # Optionnel : écriture dans un fichier temporaire (diagnostic / debug)
                             tmp_csv_path = os.path.join(csv_temp_dir, cf.name)
                             try:
@@ -896,6 +903,9 @@ with tab_ingest:
                             log(f"[CSV-DEBUG] CSV '{cf.name}': {len(groups)} groupe(s), {total_files_in_csv} fichier(s) total")
                             for g_name, g_paths in groups.items():
                                 log(f"[CSV-DEBUG]   Groupe '{g_name}': {len(g_paths)} fichier(s)")
+                                # Lister TOUS les fichiers trouvés
+                                for idx, fpath in enumerate(g_paths):
+                                    log(f"[CSV-DEBUG]     [{idx+1}] {fpath}")
 
                             base_name = Path(cf.name).stem
                             db_path = os.path.join(base_root, base_name)
