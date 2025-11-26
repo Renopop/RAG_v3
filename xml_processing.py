@@ -1,6 +1,6 @@
 """
 XML Processing Module - Parser pour fichiers XML de normes EASA
-Spécialisé pour extraire et découper par sections CS xx.xxx
+Supporte plusieurs patterns de découpage: CS xx.xxx, AMC, CS-E, CS-APU, ou custom
 """
 
 import os
@@ -8,46 +8,98 @@ import re
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
+from enum import Enum
 import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
 
-# Pattern pour détecter les sections EASA (CS 25.101, CS-25.101, CS25.101, etc.)
-EASA_SECTION_PATTERN = re.compile(
-    r'(CS[-\s]?\d+[A-Z]?[-.]?\d+(?:\.\d+)?(?:\s*[a-z])?)',
-    re.IGNORECASE
-)
+class SectionPattern(Enum):
+    """Patterns de découpage prédéfinis"""
+    CS_STANDARD = "cs_standard"      # CS 25.101, CS-25.101, CS25.101
+    AMC = "amc"                       # AMC 25.101, AMC-25.101
+    CS_E = "cs_e"                     # CS-E 100, CS-E 200
+    CS_APU = "cs_apu"                 # CS-APU 100, CS-APU 200
+    GM = "gm"                         # GM 25.101 (Guidance Material)
+    ALL_EASA = "all_easa"             # Tous les patterns EASA combinés
+    CUSTOM = "custom"                 # Pattern regex personnalisé
+
+
+# Patterns regex prédéfinis
+PATTERNS = {
+    SectionPattern.CS_STANDARD: re.compile(
+        r'(CS[-\s]?\d+[A-Z]?[-.]?\d+(?:\.\d+)?(?:\s*\([a-z]\))?)',
+        re.IGNORECASE
+    ),
+    SectionPattern.AMC: re.compile(
+        r'(AMC[-\s]?\d+[A-Z]?[-.]?\d+(?:\.\d+)?(?:\s*\([a-z]\))?)',
+        re.IGNORECASE
+    ),
+    SectionPattern.CS_E: re.compile(
+        r'(CS[-\s]?E[-\s]?\d+(?:\.\d+)?(?:\s*\([a-z]\))?)',
+        re.IGNORECASE
+    ),
+    SectionPattern.CS_APU: re.compile(
+        r'(CS[-\s]?APU[-\s]?\d+(?:\.\d+)?(?:\s*\([a-z]\))?)',
+        re.IGNORECASE
+    ),
+    SectionPattern.GM: re.compile(
+        r'(GM[-\s]?\d+[A-Z]?[-.]?\d+(?:\.\d+)?(?:\s*\([a-z]\))?)',
+        re.IGNORECASE
+    ),
+    SectionPattern.ALL_EASA: re.compile(
+        r'((CS[-\s]?\d+[A-Z]?[-.]?\d+|AMC[-\s]?\d+[A-Z]?[-.]?\d+|CS[-\s]?E[-\s]?\d+|CS[-\s]?APU[-\s]?\d+|GM[-\s]?\d+[A-Z]?[-.]?\d+)(?:\.\d+)?(?:\s*\([a-z]\))?)',
+        re.IGNORECASE
+    ),
+}
+
+# Descriptions pour l'UI
+PATTERN_DESCRIPTIONS = {
+    SectionPattern.CS_STANDARD: "CS xx.xxx - Certification Specifications (ex: CS 25.101, CS-25.102)",
+    SectionPattern.AMC: "AMC xx.xxx - Acceptable Means of Compliance (ex: AMC 25.101)",
+    SectionPattern.CS_E: "CS-E xxx - Engine Certification (ex: CS-E 100, CS-E 210)",
+    SectionPattern.CS_APU: "CS-APU xxx - APU Certification (ex: CS-APU 100)",
+    SectionPattern.GM: "GM xx.xxx - Guidance Material (ex: GM 25.101)",
+    SectionPattern.ALL_EASA: "Tous EASA - Détecte CS, AMC, CS-E, CS-APU, GM",
+    SectionPattern.CUSTOM: "Custom - Pattern regex personnalisé",
+}
 
 
 @dataclass
 class XMLParseConfig:
     """Configuration pour le parsing XML"""
-    split_by_sections: bool = True           # Découper par sections CS xx.xxx
-    include_section_title: bool = True       # Inclure le titre de section dans le chunk
-    min_section_length: int = 50             # Longueur minimum d'une section (caractères)
-    excluded_tags: List[str] = field(default_factory=list)  # Tags XML à exclure
+    pattern_type: SectionPattern = SectionPattern.ALL_EASA
+    custom_pattern: Optional[str] = None  # Regex personnalisé si pattern_type == CUSTOM
+    include_section_title: bool = True
+    min_section_length: int = 50
+    excluded_tags: List[str] = field(default_factory=list)
 
 
 @dataclass
-class EASASection:
-    """Une section de norme EASA"""
-    code: str           # Ex: "CS 25.101"
-    title: str          # Titre de la section
-    content: str        # Contenu textuel
-    start_pos: int      # Position dans le texte original
+class Section:
+    """Une section de document"""
+    code: str
+    title: str
+    content: str
+    start_pos: int
+
+
+def get_pattern_regex(config: XMLParseConfig) -> Optional[re.Pattern]:
+    """Retourne le pattern regex selon la configuration"""
+    if config.pattern_type == SectionPattern.CUSTOM:
+        if config.custom_pattern:
+            try:
+                return re.compile(config.custom_pattern, re.IGNORECASE)
+            except re.error as e:
+                logger.error(f"Pattern regex invalide: {e}")
+                return None
+        return None
+    return PATTERNS.get(config.pattern_type)
 
 
 def extract_text_from_xml(xml_path: str, config: Optional[XMLParseConfig] = None) -> str:
     """
     Extrait le texte d'un fichier XML.
-
-    Args:
-        xml_path: Chemin vers le fichier XML
-        config: Configuration (optionnelle)
-
-    Returns:
-        Texte extrait du XML
     """
     if config is None:
         config = XMLParseConfig()
@@ -58,7 +110,6 @@ def extract_text_from_xml(xml_path: str, config: Optional[XMLParseConfig] = None
         return _extract_all_text(root, config)
     except ET.ParseError as e:
         logger.error(f"Erreur de parsing XML {xml_path}: {e}")
-        # Fallback: lire comme texte brut
         try:
             with open(xml_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
@@ -82,19 +133,14 @@ def _extract_all_text(root: ET.Element, config: XMLParseConfig) -> str:
 
     def recurse(elem):
         tag_name = _strip_namespace(elem.tag)
-
-        # Ignorer les tags exclus
         if tag_name.lower() in [t.lower() for t in config.excluded_tags]:
             return
-
         if elem.text:
             text = elem.text.strip()
             if text:
                 texts.append(text)
-
         for child in elem:
             recurse(child)
-
         if elem.tail:
             tail = elem.tail.strip()
             if tail:
@@ -104,89 +150,85 @@ def _extract_all_text(root: ET.Element, config: XMLParseConfig) -> str:
     return "\n".join(texts)
 
 
-def detect_easa_sections(text: str) -> List[EASASection]:
+def detect_sections(text: str, config: Optional[XMLParseConfig] = None) -> List[Section]:
     """
-    Détecte et extrait les sections EASA (CS xx.xxx) dans un texte.
-
-    Args:
-        text: Texte à analyser
-
-    Returns:
-        Liste des sections trouvées
+    Détecte et extrait les sections selon le pattern configuré.
     """
-    sections = []
+    if config is None:
+        config = XMLParseConfig()
 
-    # Trouver tous les marqueurs de section
-    matches = list(EASA_SECTION_PATTERN.finditer(text))
+    pattern = get_pattern_regex(config)
 
-    if not matches:
-        # Pas de sections trouvées, retourner tout le texte comme une seule section
-        return [EASASection(
+    if pattern is None:
+        # Pas de pattern, retourner tout comme une seule section
+        return [Section(
             code="DOCUMENT",
             title="Contenu complet",
             content=text.strip(),
             start_pos=0
         )]
 
+    matches = list(pattern.finditer(text))
+
+    if not matches:
+        return [Section(
+            code="DOCUMENT",
+            title="Contenu complet (aucune section détectée)",
+            content=text.strip(),
+            start_pos=0
+        )]
+
+    sections = []
     for i, match in enumerate(matches):
         code = match.group(1).strip()
         start_pos = match.start()
+        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
 
-        # Fin de la section = début de la suivante ou fin du texte
-        if i + 1 < len(matches):
-            end_pos = matches[i + 1].start()
-        else:
-            end_pos = len(text)
-
-        # Extraire le contenu de la section
         section_text = text[start_pos:end_pos].strip()
 
-        # Extraire le titre (première ligne après le code)
+        # Extraire le titre
         lines = section_text.split('\n')
         title = ""
-        if len(lines) > 0:
-            # Le titre est souvent sur la même ligne ou la ligne suivante
+        if lines:
             first_line = lines[0].replace(code, "").strip()
             if first_line:
-                title = first_line[:100]  # Limiter la longueur du titre
+                title = first_line[:100]
             elif len(lines) > 1:
                 title = lines[1].strip()[:100]
 
-        content = section_text
-
-        sections.append(EASASection(
+        sections.append(Section(
             code=code,
             title=title,
-            content=content,
+            content=section_text,
             start_pos=start_pos
         ))
 
     return sections
 
 
-def analyze_xml_for_easa(xml_path: str) -> Dict[str, Any]:
+def analyze_xml(xml_path: str, config: Optional[XMLParseConfig] = None) -> Dict[str, Any]:
     """
-    Analyse un fichier XML pour détecter les sections EASA.
+    Analyse un fichier XML et détecte les sections.
+    """
+    if config is None:
+        config = XMLParseConfig()
 
-    Returns:
-        Dict avec informations sur le document et les sections trouvées
-    """
     result = {
         "file": os.path.basename(xml_path),
         "total_chars": 0,
         "sections_count": 0,
         "sections": [],
+        "pattern_used": config.pattern_type.value,
         "error": None
     }
 
     try:
-        text = extract_text_from_xml(xml_path)
+        text = extract_text_from_xml(xml_path, config)
         result["total_chars"] = len(text)
 
-        sections = detect_easa_sections(text)
+        sections = detect_sections(text, config)
         result["sections_count"] = len(sections)
 
-        # Résumé des sections
         for sec in sections:
             result["sections"].append({
                 "code": sec.code,
@@ -201,18 +243,14 @@ def analyze_xml_for_easa(xml_path: str) -> Dict[str, Any]:
     return result
 
 
-def preview_xml_sections(xml_path: str, max_sections: int = 10) -> Tuple[str, Dict[str, Any]]:
+def preview_sections(xml_path: str, config: Optional[XMLParseConfig] = None, max_sections: int = 10) -> Tuple[str, Dict[str, Any]]:
     """
-    Génère une prévisualisation des sections EASA trouvées dans un XML.
-
-    Args:
-        xml_path: Chemin vers le fichier XML
-        max_sections: Nombre max de sections à afficher
-
-    Returns:
-        Tuple (texte_preview, stats)
+    Génère une prévisualisation des sections trouvées.
     """
-    analysis = analyze_xml_for_easa(xml_path)
+    if config is None:
+        config = XMLParseConfig()
+
+    analysis = analyze_xml(xml_path, config)
 
     if analysis["error"]:
         return f"Erreur: {analysis['error']}", analysis
@@ -220,10 +258,9 @@ def preview_xml_sections(xml_path: str, max_sections: int = 10) -> Tuple[str, Di
     lines = []
     lines.append(f"📄 Fichier: {analysis['file']}")
     lines.append(f"📊 {analysis['total_chars']:,} caractères")
+    lines.append(f"🔍 Pattern: {PATTERN_DESCRIPTIONS.get(config.pattern_type, config.pattern_type.value)}")
     lines.append(f"📑 {analysis['sections_count']} section(s) détectée(s)")
     lines.append("")
-    lines.append("=" * 50)
-    lines.append("SECTIONS TROUVÉES:")
     lines.append("=" * 50)
 
     for i, sec in enumerate(analysis["sections"][:max_sections]):
@@ -232,7 +269,7 @@ def preview_xml_sections(xml_path: str, max_sections: int = 10) -> Tuple[str, Di
         if sec['title']:
             lines.append(f"    Titre: {sec['title']}")
         lines.append(f"    Taille: {sec['length']:,} caractères")
-        lines.append(f"    Aperçu: {sec['preview'][:100]}...")
+        lines.append(f"    Aperçu: {sec['preview'][:80]}...")
 
     if analysis["sections_count"] > max_sections:
         lines.append("")
@@ -244,23 +281,12 @@ def preview_xml_sections(xml_path: str, max_sections: int = 10) -> Tuple[str, Di
 def get_sections_for_chunking(xml_path: str, config: Optional[XMLParseConfig] = None) -> List[Dict[str, str]]:
     """
     Retourne les sections prêtes pour le chunking.
-
-    Chaque section devient un chunk avec:
-    - text: le contenu
-    - metadata: code de section, titre
-
-    Args:
-        xml_path: Chemin vers le fichier XML
-        config: Configuration de parsing
-
-    Returns:
-        Liste de dicts {text, code, title}
     """
     if config is None:
         config = XMLParseConfig()
 
     text = extract_text_from_xml(xml_path, config)
-    sections = detect_easa_sections(text)
+    sections = detect_sections(text, config)
 
     chunks = []
     for sec in sections:
@@ -278,12 +304,19 @@ def get_sections_for_chunking(xml_path: str, config: Optional[XMLParseConfig] = 
     return chunks
 
 
-# Pour compatibilité avec l'ancien code
+# Compatibilité avec l'ancien code
 def detect_xml_structure(xml_path: str) -> Dict[str, Any]:
-    """Analyse la structure d'un fichier XML (compatibilité)"""
-    return analyze_xml_for_easa(xml_path)
+    """Compatibilité: alias pour analyze_xml"""
+    return analyze_xml(xml_path)
 
+def analyze_xml_for_easa(xml_path: str) -> Dict[str, Any]:
+    """Compatibilité: alias pour analyze_xml avec pattern ALL_EASA"""
+    return analyze_xml(xml_path, XMLParseConfig(pattern_type=SectionPattern.ALL_EASA))
+
+def preview_xml_sections(xml_path: str, max_sections: int = 10) -> Tuple[str, Dict[str, Any]]:
+    """Compatibilité: alias pour preview_sections"""
+    return preview_sections(xml_path, None, max_sections)
 
 def get_recommended_config(structure_info: Dict[str, Any]) -> XMLParseConfig:
-    """Retourne une config par défaut (compatibilité)"""
+    """Compatibilité: retourne config par défaut"""
     return XMLParseConfig()

@@ -32,8 +32,10 @@ from rag_query import run_rag_query
 from feedback_store import FeedbackStore, create_feedback, QueryFeedback
 from xml_processing import (
     XMLParseConfig,
-    preview_xml_sections,
-    analyze_xml_for_easa,
+    SectionPattern,
+    PATTERN_DESCRIPTIONS,
+    analyze_xml,
+    preview_sections,
 )
 
 # Optionnel : fonction d'extraction des pièces jointes PDF si disponible
@@ -618,13 +620,44 @@ with tab_ingest:
         st.markdown("---")
         st.markdown("### 📄 Fichiers XML détectés - Normes EASA")
         st.info(f"**{len(xml_files_detected)} fichier(s) XML** détecté(s). "
-                "Le parser détecte automatiquement les sections **CS xx.xxx**.")
+                "Choisissez le pattern de découpage pour chaque fichier.")
 
         for xml_path in xml_files_detected:
             with st.expander(f"📄 {os.path.basename(xml_path)}", expanded=True):
                 try:
-                    # Analyser pour les sections EASA
-                    analysis = analyze_xml_for_easa(xml_path)
+                    # Sélection du pattern de découpage
+                    pattern_options = list(SectionPattern)
+                    pattern_labels = [PATTERN_DESCRIPTIONS[p] for p in pattern_options]
+
+                    selected_idx = st.selectbox(
+                        "Pattern de découpage",
+                        range(len(pattern_options)),
+                        index=pattern_options.index(SectionPattern.ALL_EASA),
+                        format_func=lambda i: pattern_labels[i],
+                        key=f"pattern_{xml_path}",
+                        help="Choisissez comment découper le document en sections"
+                    )
+                    selected_pattern = pattern_options[selected_idx]
+
+                    # Champ pour pattern custom
+                    custom_regex = None
+                    if selected_pattern == SectionPattern.CUSTOM:
+                        custom_regex = st.text_input(
+                            "Pattern regex personnalisé",
+                            value=r"(SECTION[-\s]?\d+)",
+                            key=f"custom_pattern_{xml_path}",
+                            help="Entrez une expression régulière. Le groupe (1) sera utilisé comme code de section."
+                        )
+                        st.caption("Exemples: `(CHAPTER\\s+\\d+)`, `(ART\\.?\\s*\\d+)`, `(§\\s*\\d+\\.\\d+)`")
+
+                    # Créer la config
+                    config = XMLParseConfig(
+                        pattern_type=selected_pattern,
+                        custom_pattern=custom_regex
+                    )
+
+                    # Analyser avec le pattern sélectionné
+                    analysis = analyze_xml(xml_path, config)
 
                     if analysis.get("error"):
                         st.error(f"Erreur: {analysis['error']}")
@@ -635,13 +668,13 @@ with tab_ingest:
                     with col1:
                         st.metric("📊 Caractères", f"{analysis['total_chars']:,}")
                     with col2:
-                        st.metric("📑 Sections CS détectées", analysis['sections_count'])
+                        st.metric("📑 Sections détectées", analysis['sections_count'])
 
                     # Liste des sections trouvées
                     if analysis['sections']:
                         st.markdown("**Sections trouvées:**")
                         sections_display = []
-                        for sec in analysis['sections'][:15]:  # Max 15 sections affichées
+                        for sec in analysis['sections'][:15]:
                             title_part = f" - {sec['title']}" if sec['title'] else ""
                             sections_display.append(f"• **{sec['code']}**{title_part} ({sec['length']:,} car.)")
 
@@ -652,16 +685,16 @@ with tab_ingest:
 
                     # Prévisualisation du texte
                     if st.button(f"👁️ Voir aperçu complet", key=f"preview_{xml_path}"):
-                        preview_text, _ = preview_xml_sections(xml_path, max_sections=20)
+                        preview_text, _ = preview_sections(xml_path, config, max_sections=20)
                         st.text_area("Aperçu", preview_text, height=400, key=f"preview_area_{xml_path}")
 
-                    # Config par défaut
-                    st.session_state["xml_configs"][xml_path] = XMLParseConfig()
+                    # Sauvegarder la config
+                    st.session_state["xml_configs"][xml_path] = config
 
                 except Exception as e:
                     st.error(f"Erreur: {e}")
 
-        # Validation automatique (plus besoin de bouton complexe)
+        # Validation
         if st.button("✅ Confirmer et continuer", type="primary"):
             st.session_state["xml_preview_validated"] = True
             st.success("Configuration validée !")
