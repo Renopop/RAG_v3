@@ -1,6 +1,6 @@
 # streamlit_RAG.py
 # Interface Streamlit pour :
-#  - ingestion de documents dans Chroma (via CSV ou upload direct)
+#  - ingestion de documents dans FAISS (via CSV ou upload direct)
 #  - question / réponse RAG via Snowflake + DALLEM
 #
 # Cette version :
@@ -43,7 +43,7 @@ logger = make_logger(debug=False)
 #  CONFIG LOCALE À PERSONNALISER
 # =====================================================================
 # ⚠ IMPORTANT :
-#    - BASE_ROOT_DIR : chemin ABSOLU vers le dossier racine des bases FAISS (remplace ChromaDB)
+#    - BASE_ROOT_DIR : chemin ABSOLU vers le dossier racine des bases FAISS
 #    - CSV_IMPORT_DIR : chemin ABSOLU vers le dossier où écrire les CSV d'ingestion
 #    - CSV_EXPORT_DIR : chemin ABSOLU vers le dossier où écrire les CSV de tracking
 

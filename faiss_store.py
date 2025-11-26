@@ -1,5 +1,5 @@
 """
-FAISS-based vector store - Remplacement de ChromaDB
+FAISS-based vector store
 Optimisé pour les partages réseau Windows (pas de SQLite)
 
 Architecture:
@@ -7,10 +7,10 @@ Architecture:
 - Dans chaque base: sous-dossiers pour chaque collection
 - Dans chaque collection: index.faiss + metadata.json
 
-Avantages vs ChromaDB:
+Avantages:
 - Pas de SQLite (pas de problèmes de verrouillage réseau)
 - Fichiers simples qui se synchronisent bien
-- Plus rapide
+- Rapide
 - Compatible partages réseau Windows
 """
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class FaissCollection:
-    """Collection FAISS - équivalent d'une collection ChromaDB"""
+    """Collection FAISS pour stocker et rechercher des embeddings"""
 
     def __init__(self, collection_path: str, name: str, dimension: int = 1024):
         """
@@ -149,10 +149,10 @@ class FaissCollection:
         Args:
             query_embeddings: Liste des vecteurs de requête
             n_results: Nombre de résultats à retourner
-            include: Liste des champs à inclure (compatible ChromaDB)
+            include: Liste des champs à inclure
 
         Returns:
-            Dict au format ChromaDB: {"ids": [[...]], "documents": [[...]], "metadatas": [[...]], "distances": [[...]]}
+            Dict: {"ids": [[...]], "documents": [[...]], "metadatas": [[...]], "distances": [[...]]}
         """
         if include is None:
             include = ["documents", "metadatas", "distances"]
@@ -176,7 +176,7 @@ class FaissCollection:
         # Recherche FAISS
         distances, indices = self.index.search(query_array, n_results)
 
-        # Formater les résultats au format ChromaDB
+        # Formater les résultats
         results = {"ids": [], "documents": [], "metadatas": [], "distances": []}
 
         for i in range(len(query_embeddings)):
@@ -247,7 +247,7 @@ class FaissCollection:
 
 
 class FaissStore:
-    """Store FAISS - équivalent d'un client ChromaDB"""
+    """Store FAISS pour gérer plusieurs collections"""
 
     def __init__(self, path: str):
         """
@@ -325,7 +325,6 @@ class FaissStore:
         return FaissCollection(collection_path, name)
 
 
-# Pour compatibilité avec l'ancien code ChromaDB
 def build_faiss_store(path: str) -> FaissStore:
-    """Crée un store FAISS (équivalent de build_chroma_client)"""
+    """Crée un store FAISS"""
     return FaissStore(path)

@@ -8,7 +8,6 @@ from typing import List, Dict, Any, Optional
 
 from langdetect import detect
 
-# FAISS remplace ChromaDB (meilleure compatibilité réseau Windows)
 from faiss_store import FaissStore
 
 from models_utils import (
@@ -31,7 +30,7 @@ from easa_sections import split_easa_sections
 logger = make_logger(debug=False)
 
 # =====================================================================
-#  FAISS HELPERS (remplace ChromaDB)
+#  FAISS HELPERS
 # =====================================================================
 
 def build_faiss_store(path: str) -> FaissStore:
@@ -120,14 +119,14 @@ def ingest_documents(
     logical_paths: Optional[Dict[str, str]] = None,
     progress_callback: Optional[callable] = None,
 ) -> Dict[str, Any]:
-    """Ingest a list of documents into a Chroma collection.
+    """Ingest a list of documents into a FAISS collection.
 
     Steps:
       - load raw text (PDF / DOCX / CSV)
       - optionally split into EASA sections
       - chunk text
       - compute embeddings with Snowflake
-      - add to Chroma
+      - add to FAISS
 
     Returns a small report with total_chunks and per-file info.
     """
@@ -135,7 +134,7 @@ def ingest_documents(
     _log = log or logger
 
     _log.info(f"[INGEST] DB={db_path} | collection={collection_name}")
-    client = build_faiss_store(db_path)  # FAISS remplace ChromaDB
+    client = build_faiss_store(db_path)
 
     # Option rebuild: drop collection if it already exists
     if rebuild:
@@ -243,7 +242,7 @@ def ingest_documents(
 
         chunks: List[str] = []
         metas: List[Dict[str, Any]] = []
-        chroma_ids: List[str] = []  # IDs envoyés à Chroma (doivent être uniques)
+        faiss_ids: List[str] = []  # IDs envoyés à FAISS (doivent être uniques)
 
         base_name = os.path.basename(path)
 
@@ -275,8 +274,8 @@ def ingest_documents(
                     safe_sec_id = sec_id.replace(" ", "_") if sec_id else "no_section"
                     chunk_id = f"{base_name}_{safe_sec_id}_{i}"
 
-                    # ID réellement utilisé par Chroma (unique grâce à un uuid par chunk)
-                    chroma_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
+                    # ID réellement utilisé par FAISS (unique grâce à un uuid par chunk)
+                    faiss_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
 
                     chunks.append(ch)
                     metas.append(
@@ -290,7 +289,7 @@ def ingest_documents(
                             "language": language,        # "" si non détectée
                         }
                     )
-                    chroma_ids.append(chroma_id)
+                    faiss_ids.append(faiss_id)
 
         # ==============================================================
         # CAS 2 — Aucune section EASA : chunking global
@@ -303,7 +302,7 @@ def ingest_documents(
 
             for i, ch in enumerate(raw_chunks):
                 chunk_id = f"{base_name}_chunk_{i}"
-                chroma_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
+                faiss_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
 
                 chunks.append(ch)
                 metas.append(
@@ -317,7 +316,7 @@ def ingest_documents(
                         "language": language,      # "" si non détectée
                     }
                 )
-                chroma_ids.append(chroma_id)
+                faiss_ids.append(faiss_id)
 
         if not chunks:
             _log.warning(f"[INGEST] No chunks generated for {path}")
@@ -337,20 +336,20 @@ def ingest_documents(
         )
 
         # --------------------------------------------------------------
-        # Push to Chroma in batches (pour éviter "max batch size" > 5461)
+        # Push to FAISS in batches
         # --------------------------------------------------------------
-        max_batch = 4000  # en dessous de la limite signalée (5461)
+        max_batch = 4000
         n = len(chunks)
-        _log.info(f"[INGEST] Adding {n} embeddings to Chroma in batches of {max_batch}")
+        _log.info(f"[INGEST] Adding {n} embeddings to FAISS in batches of {max_batch}")
 
         for start in range(0, n, max_batch):
             end = start + max_batch
-            _log.debug(f"[INGEST] Chroma add batch {start}:{end}")
+            _log.debug(f"[INGEST] FAISS add batch {start}:{end}")
             col.add(
                 documents=chunks[start:end],
                 metadatas=metas[start:end],
                 embeddings=embeddings[start:end].tolist(),
-                ids=chroma_ids[start:end],
+                ids=faiss_ids[start:end],
             )
 
         total_chunks += len(chunks)
@@ -380,7 +379,6 @@ def ingest_documents(
     # =====================================================================
     # FAISS sauvegarde automatiquement après chaque add() dans notre implémentation,
     # mais on garde un délai pour que Windows synchronise les fichiers vers le réseau.
-    # Plus simple que ChromaDB car pas de SQLite = pas de verrous de fichiers!
 
     try:
         _log.info("[INGEST] FAISS cleanup for network storage synchronization...")
@@ -393,12 +391,10 @@ def ingest_documents(
         _log.info("[INGEST] FAISS store closed and resources freed")
 
         # Délai pour que Windows synchronise les fichiers FAISS vers le réseau
-        # FAISS = fichiers simples, donc délai réduit vs ChromaDB/SQLite
         _log.info("[INGEST] Waiting 2 seconds for OS to flush data to network storage...")
         time.sleep(2)
 
         _log.info("[INGEST] ✅ Database fully synchronized - safe to shut down PC")
-        _log.info("[INGEST] 💡 FAISS fonctionne beaucoup mieux que ChromaDB sur réseau Windows!")
 
     except Exception as e:
         _log.warning(f"[INGEST] Error during cleanup (database may still be OK): {e}")

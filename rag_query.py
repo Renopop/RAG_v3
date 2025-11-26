@@ -4,7 +4,6 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-# FAISS remplace ChromaDB (meilleure compatibilité réseau Windows)
 from faiss_store import FaissStore
 
 from models_utils import (
@@ -31,7 +30,7 @@ logger = make_logger(debug=False)
 
 
 # =====================================================================
-#  FAISS STORE (remplace ChromaDB)
+#  FAISS STORE
 # =====================================================================
 
 def build_store(db_path: str) -> FaissStore:
@@ -117,7 +116,7 @@ def _run_rag_query_single_collection(
     dists = raw.get("distances", [[]])[0]
 
     if not docs:
-        _log.warning("[RAG] Aucun document retourné par Chroma")
+        _log.warning("[RAG] Aucun document retourné par FAISS")
         return {
             "answer": (
                 "Aucun contexte trouvé dans la base pour répondre à la question."
