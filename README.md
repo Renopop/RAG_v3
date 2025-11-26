@@ -208,6 +208,41 @@ Document
 
 ---
 
+## ⚙️ Configuration des répertoires
+
+L'application nécessite plusieurs répertoires de stockage. Au premier lancement, si ces répertoires ne sont pas accessibles, une **page de configuration** s'affiche automatiquement.
+
+### Répertoires requis
+
+| Répertoire | Description |
+|------------|-------------|
+| **Bases FAISS** | Stockage des index vectoriels FAISS |
+| **CSV ingestion** | Fichiers CSV pour l'ingestion de documents |
+| **CSV tracking** | Fichiers de suivi des documents ingérés |
+| **Feedbacks** | Stockage des feedbacks utilisateurs |
+
+### Configuration automatique
+
+1. Au lancement, l'application vérifie l'accessibilité de tous les répertoires
+2. Si un répertoire est manquant ou inaccessible :
+   - Une page de configuration s'affiche
+   - Vous pouvez **créer les répertoires manquants** automatiquement
+   - Ou **modifier les chemins** selon votre environnement
+3. La configuration est sauvegardée dans `config.json` (fichier local, ignoré par git)
+
+### Fichier de configuration
+
+```json
+{
+  "base_root_dir": "C:\\Data\\FAISS_DATABASE\\BaseDB",
+  "csv_import_dir": "C:\\Data\\FAISS_DATABASE\\CSV_Ingestion",
+  "csv_export_dir": "C:\\Data\\FAISS_DATABASE\\CSV_Tracking",
+  "feedback_dir": "C:\\Data\\FAISS_DATABASE\\Feedbacks"
+}
+```
+
+---
+
 ## 📋 Prérequis
 
 - Python 3.8 ou supérieur
