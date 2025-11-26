@@ -173,8 +173,26 @@ def get_local_llm_model():
                 # Utiliser transformers pour les modèles HuggingFace
                 try:
                     from transformers import AutoModelForCausalLM, AutoTokenizer
+                except ImportError:
+                    raise RuntimeError(
+                        "transformers non installé. Installez-le avec:\n"
+                        "  pip install transformers torch accelerate"
+                    )
+                try:
                     import torch
-
+                except ImportError:
+                    raise RuntimeError(
+                        "torch non installé. Installez-le avec:\n"
+                        "  pip install torch"
+                    )
+                try:
+                    import accelerate
+                except ImportError:
+                    raise RuntimeError(
+                        "accelerate non installé (requis pour device_map='auto'). Installez-le avec:\n"
+                        "  pip install accelerate"
+                    )
+                try:
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                     tokenizer = AutoTokenizer.from_pretrained(LOCAL_LLM_PATH)
                     model = AutoModelForCausalLM.from_pretrained(
@@ -185,10 +203,10 @@ def get_local_llm_model():
                     )
                     _local_llm_model = {"model": model, "tokenizer": tokenizer, "device": device}
                     print(f"✅ Modèle LLM HuggingFace chargé: {LOCAL_LLM_PATH} (device: {device})")
-                except ImportError:
-                    raise RuntimeError(
-                        "transformers non installé. Installez-le avec: pip install transformers torch"
-                    )
+                except Exception as e:
+                    raise RuntimeError(f"Erreur lors du chargement du modèle LLM HuggingFace: {e}")
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Erreur lors du chargement du modèle LLM: {e}")
     return _local_llm_model
