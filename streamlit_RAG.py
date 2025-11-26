@@ -478,6 +478,8 @@ if current_user in allowed_users:
             st.session_state["local_embedding_path"] = "D:\\IA Test\\models\\BAAI\\bge-m3"
         if "local_llm_path" not in st.session_state:
             st.session_state["local_llm_path"] = "D:\\IA Test\\models\\Qwen\\Qwen2.5-3B-Instruct"
+        if "local_reranker_path" not in st.session_state:
+            st.session_state["local_reranker_path"] = "D:\\IA Test\\models\\BAAI\\bge-reranker-v2-m3"
 
         use_local = st.checkbox(
             "🔧 Activer le mode test local (modèles locaux)",
@@ -505,6 +507,14 @@ if current_user in allowed_users:
             )
             st.session_state["local_llm_path"] = local_llm_path
 
+            local_reranker_path = st.text_input(
+                "📁 Chemin du modèle reranker local",
+                value=st.session_state["local_reranker_path"],
+                placeholder="Ex: BAAI/bge-reranker-v2-m3 ou /path/to/model",
+                help="Modèle cross-encoder pour le reranking (optionnel)"
+            )
+            st.session_state["local_reranker_path"] = local_reranker_path
+
             if local_embedding_path:
                 st.success(f"✅ Embedding: {local_embedding_path}")
             else:
@@ -515,8 +525,13 @@ if current_user in allowed_users:
             else:
                 st.info("ℹ️ Aucun modèle LLM spécifié")
 
+            if local_reranker_path:
+                st.success(f"✅ Reranker: {local_reranker_path}")
+            else:
+                st.info("ℹ️ Aucun modèle reranker spécifié (API utilisée)")
+
             # Activer le mode local dans models_utils
-            set_local_mode(True, local_embedding_path, local_llm_path)
+            set_local_mode(True, local_embedding_path, local_llm_path, local_reranker_path)
         else:
             st.caption(f"🔹 Embeddings : **Snowflake** – `{EMBED_MODEL}`")
             st.caption(f"🔹 LLM : **DALLEM** – `{LLM_MODEL}`")

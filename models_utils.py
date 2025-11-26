@@ -21,16 +21,19 @@ import openai
 USE_LOCAL_MODELS = False
 LOCAL_EMBEDDING_PATH = None
 LOCAL_LLM_PATH = None
+LOCAL_RERANKER_PATH = None
 _local_embedding_model = None
 _local_llm_model = None
+_local_reranker_model = None
 
 
-def set_local_mode(use_local: bool, embedding_path: str = None, llm_path: str = None):
+def set_local_mode(use_local: bool, embedding_path: str = None, llm_path: str = None, reranker_path: str = None):
     """Configure le mode test local avec les chemins des modèles."""
-    global USE_LOCAL_MODELS, LOCAL_EMBEDDING_PATH, LOCAL_LLM_PATH
+    global USE_LOCAL_MODELS, LOCAL_EMBEDDING_PATH, LOCAL_LLM_PATH, LOCAL_RERANKER_PATH
     USE_LOCAL_MODELS = use_local
     LOCAL_EMBEDDING_PATH = embedding_path
     LOCAL_LLM_PATH = llm_path
+    LOCAL_RERANKER_PATH = reranker_path
 
 
 def get_local_embedding_model():
@@ -60,6 +63,74 @@ def get_local_embedding_model():
         except Exception as e:
             raise RuntimeError(f"Erreur lors du chargement du modèle d'embedding: {e}")
     return _local_embedding_model
+
+
+def get_local_reranker_model():
+    """Charge et retourne le modèle de reranking local (cross-encoder)."""
+    global _local_reranker_model
+    if _local_reranker_model is None and LOCAL_RERANKER_PATH:
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError:
+            raise RuntimeError(
+                "sentence-transformers non installé. Installez-le avec:\n"
+                "  pip install sentence-transformers"
+            )
+        try:
+            import torch
+        except ImportError:
+            raise RuntimeError(
+                "torch non installé. Installez-le avec:\n"
+                "  pip install torch"
+            )
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _local_reranker_model = CrossEncoder(LOCAL_RERANKER_PATH, device=device)
+            print(f"✅ Modèle reranker local chargé: {LOCAL_RERANKER_PATH} (device: {device})")
+        except Exception as e:
+            raise RuntimeError(f"Erreur lors du chargement du modèle reranker: {e}")
+    return _local_reranker_model
+
+
+def rerank_local(query: str, documents: List[str], top_k: int = None) -> List[dict]:
+    """
+    Rerank des documents avec le modèle local.
+
+    Args:
+        query: La requête de recherche
+        documents: Liste des textes de documents à reranker
+        top_k: Nombre de résultats à retourner (None = tous)
+
+    Returns:
+        Liste de dicts avec 'index', 'score', 'text' triés par score décroissant
+    """
+    model = get_local_reranker_model()
+    if model is None:
+        raise RuntimeError("Aucun modèle reranker local configuré")
+
+    # Créer les paires query-document
+    pairs = [(query, doc) for doc in documents]
+
+    # Calculer les scores
+    scores = model.predict(pairs)
+
+    # Créer la liste des résultats
+    results = []
+    for idx, (score, doc) in enumerate(zip(scores, documents)):
+        results.append({
+            "index": idx,
+            "score": float(score),
+            "text": doc
+        })
+
+    # Trier par score décroissant
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    # Limiter si top_k spécifié
+    if top_k is not None:
+        results = results[:top_k]
+
+    return results
 
 
 def get_local_llm_model():
