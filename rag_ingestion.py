@@ -1,0 +1,406 @@
+import os
+import uuid
+import gc
+import time
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any, Optional
+
+from langdetect import detect
+
+# FAISS remplace ChromaDB (meilleure compatibilité réseau Windows)
+from faiss_store import FaissStore
+
+from models_utils import (
+    make_logger,
+    EMBED_MODEL,
+    BATCH_SIZE,
+    DirectOpenAIEmbeddings,
+    embed_in_batches,
+    SNOWFLAKE_API_KEY,
+    SNOWFLAKE_API_BASE,
+    create_http_client,
+)
+
+from pdf_processing import extract_text_from_pdf, extract_attachments_from_pdf
+from docx_processing import extract_text_from_docx
+from csv_processing import extract_text_from_csv
+from chunking import simple_chunk
+from easa_sections import split_easa_sections
+
+logger = make_logger(debug=False)
+
+# =====================================================================
+#  FAISS HELPERS (remplace ChromaDB)
+# =====================================================================
+
+def build_faiss_store(path: str) -> FaissStore:
+    """Create (and if needed, initialize) a FAISS store."""
+    os.makedirs(path, exist_ok=True)
+    return FaissStore(path=path)
+
+
+def get_or_create_collection(store: FaissStore, name: str):
+    """Return an existing collection or create it if missing."""
+    return store.get_or_create_collection(name=name, dimension=1024)  # Snowflake Arctic = 1024d
+
+# =====================================================================
+#  FILE LOADING
+# =====================================================================
+
+def load_file_content(path: str) -> str:
+    """Load text from a supported file type (PDF, DOCX, CSV, TXT, MD)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return extract_text_from_pdf(path)
+    if ext in (".doc", ".docx"):
+        # Note: legacy .doc may fail depending on content; .docx is fully supported.
+        return extract_text_from_docx(path)
+    if ext == ".csv":
+        return extract_text_from_csv(path)
+    if ext in (".txt", ".md"):
+        # Plain text / Markdown files: read as UTF-8 with tolerant error handling
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    raise ValueError(f"Unsupported file format for ingestion: {ext} ({path})")
+
+
+def detect_language(text: str) -> str:
+    try:
+        return detect(text)
+    except Exception:
+        return "unk"
+
+
+def _load_single_file_worker(path: str) -> Dict[str, Any]:
+    """
+    Worker function for parallel file loading.
+    Returns a dict with path, text, language, and error (if any).
+    Must be at module level for pickling by multiprocessing.
+    """
+    result = {
+        "path": path,
+        "text": "",
+        "language": "",
+        "error": None
+    }
+
+    try:
+        if not os.path.isfile(path):
+            result["error"] = f"File not found: {path}"
+            return result
+
+        text = load_file_content(path)
+
+        if not text.strip():
+            result["error"] = f"No text extracted from {path}"
+            return result
+
+        result["text"] = text
+        result["language"] = detect_language(text) or ""
+
+    except Exception as e:
+        result["error"] = f"Error loading {path}: {str(e)}"
+
+    return result
+
+
+# =====================================================================
+#  INGESTION
+# =====================================================================
+
+def ingest_documents(
+    file_paths: List[str],
+    db_path: str,
+    collection_name: str,
+    chunk_size: int = 1000,
+    use_easa_sections: bool = True,
+    rebuild: bool = False,
+    log=None,
+    logical_paths: Optional[Dict[str, str]] = None,
+    progress_callback: Optional[callable] = None,
+) -> Dict[str, Any]:
+    """Ingest a list of documents into a Chroma collection.
+
+    Steps:
+      - load raw text (PDF / DOCX / CSV)
+      - optionally split into EASA sections
+      - chunk text
+      - compute embeddings with Snowflake
+      - add to Chroma
+
+    Returns a small report with total_chunks and per-file info.
+    """
+
+    _log = log or logger
+
+    _log.info(f"[INGEST] DB={db_path} | collection={collection_name}")
+    client = build_faiss_store(db_path)  # FAISS remplace ChromaDB
+
+    # Option rebuild: drop collection if it already exists
+    if rebuild:
+        try:
+            existing = client.list_collections()  # FAISS retourne directement une liste de noms
+            if collection_name in existing:
+                client.delete_collection(collection_name)
+                _log.info(
+                    f"[INGEST] Collection '{collection_name}' deleted (rebuild=True)"
+                )
+        except Exception as e:
+            _log.warning(
+                f"[INGEST] Could not delete collection '{collection_name}': {e}"
+            )
+
+    col = get_or_create_collection(client, collection_name)
+
+    # Embeddings client for Snowflake Arctic
+    http_client = create_http_client()
+    emb_client = DirectOpenAIEmbeddings(
+        model=EMBED_MODEL,
+        api_key=SNOWFLAKE_API_KEY,
+        base_url=SNOWFLAKE_API_BASE,
+        http_client=http_client,
+        role_prefix=True,
+        logger=_log,
+    )
+
+    total_chunks = 0
+    file_reports: List[Dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # Chargement parallèle des fichiers (extraction texte multi-threads)
+    # ------------------------------------------------------------------
+    # Note: ThreadPoolExecutor au lieu de ProcessPoolExecutor pour éviter
+    # les problèmes avec PyMuPDF sur Windows (MemoryError, DLL load failures)
+    _log.info(f"[INGEST] Starting parallel file loading with {multiprocessing.cpu_count()} threads")
+
+    # Utiliser ThreadPoolExecutor pour le traitement parallèle
+    # Threads au lieu de processus = meilleure compatibilité Windows + PyMuPDF
+    max_workers = min(multiprocessing.cpu_count(), len(file_paths))
+
+    # Dictionnaire pour stocker les résultats chargés: path -> {text, language, error}
+    loaded_files: Dict[str, Dict[str, Any]] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Soumettre tous les fichiers pour traitement parallèle
+        future_to_path = {executor.submit(_load_single_file_worker, path): path for path in file_paths}
+
+        # Compteur pour la barre de progression
+        completed_count = 0
+        total_count = len(file_paths)
+
+        # Récupérer les résultats au fur et à mesure
+        for future in as_completed(future_to_path):
+            try:
+                result = future.result()
+                path = result["path"]
+                filename = os.path.basename(path)
+
+                if result["error"]:
+                    _log.error(f"[INGEST] {result['error']}")
+                else:
+                    loaded_files[path] = result
+                    _log.info(f"[INGEST] Loaded file: {path} ({len(result['text'])} chars)")
+
+                # Mise à jour de la progression
+                completed_count += 1
+                if progress_callback:
+                    progress_fraction = 0.3 * (completed_count / total_count)  # 0-30% pour le chargement
+                    progress_callback(
+                        progress_fraction,
+                        f"📄 Chargement: {completed_count}/{total_count} - {filename}"
+                    )
+
+            except Exception as e:
+                path = future_to_path[future]
+                _log.error(f"[INGEST] Unexpected error loading {path}: {e}")
+                completed_count += 1
+                if progress_callback:
+                    progress_fraction = 0.3 * (completed_count / total_count)
+                    progress_callback(progress_fraction, f"❌ Erreur: {os.path.basename(path)}")
+
+    _log.info(f"[INGEST] Parallel loading complete: {len(loaded_files)}/{len(file_paths)} files loaded")
+
+    # ------------------------------------------------------------------
+    # Traitement séquentiel des fichiers chargés (chunking + embedding)
+    # ------------------------------------------------------------------
+    processed_count = 0
+    total_loaded = len(loaded_files)
+
+    for path in file_paths:
+        # Récupérer le fichier chargé (peut être None si échec)
+        file_data = loaded_files.get(path)
+        if not file_data:
+            continue  # Déjà logué dans la phase de chargement
+
+        text = file_data["text"]
+        language = file_data["language"]
+
+        # --------------------------------------------------------------
+        # Try to split into EASA sections (CS / AMC / GM / CS-E / CS-APU)
+        # --------------------------------------------------------------
+        sections = split_easa_sections(text) if use_easa_sections else []
+
+        chunks: List[str] = []
+        metas: List[Dict[str, Any]] = []
+        chroma_ids: List[str] = []  # IDs envoyés à Chroma (doivent être uniques)
+
+        base_name = os.path.basename(path)
+
+        # ==============================================================
+        # CAS 1 — Sections EASA détectées
+        # ==============================================================
+        if sections:
+            _log.info(
+                f"[INGEST] {len(sections)} EASA section(s) detected for {path}"
+            )
+            for sec in sections:
+                # easa_sections.split_easa_sections() returns:
+                # { 'id': 'CS 25.613', 'kind': 'CS', 'number': '25.613',
+                #   'title': '...', 'full_text': '...' }
+                sec_id = (sec.get("id") or "").strip()
+                sec_kind = (sec.get("kind") or "").strip()
+                sec_title = (sec.get("title") or "").strip()
+                sec_text = (sec.get("full_text") or "").strip()
+
+                if not sec_text:
+                    continue
+
+                sec_chunks = simple_chunk(
+                    sec_text, chunk_size=chunk_size, overlap=150
+                )
+
+                for i, ch in enumerate(sec_chunks):
+                    # chunk_id lisible / logique
+                    safe_sec_id = sec_id.replace(" ", "_") if sec_id else "no_section"
+                    chunk_id = f"{base_name}_{safe_sec_id}_{i}"
+
+                    # ID réellement utilisé par Chroma (unique grâce à un uuid par chunk)
+                    chroma_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
+
+                    chunks.append(ch)
+                    metas.append(
+                        {
+                            "source_file": base_name,
+                            "path": logical_paths.get(path, path) if logical_paths else path,
+                            "chunk_id": chunk_id,        # pour l'UI, les logs
+                            "section_id": sec_id,        # "" si pas d'ID
+                            "section_kind": sec_kind,    # "" si vide
+                            "section_title": sec_title,  # "" si vide
+                            "language": language,        # "" si non détectée
+                        }
+                    )
+                    chroma_ids.append(chroma_id)
+
+        # ==============================================================
+        # CAS 2 — Aucune section EASA : chunking global
+        # ==============================================================
+        else:
+            _log.info(
+                f"[INGEST] No EASA sections detected → global chunking for {path}"
+            )
+            raw_chunks = simple_chunk(text, chunk_size=chunk_size, overlap=150)
+
+            for i, ch in enumerate(raw_chunks):
+                chunk_id = f"{base_name}_chunk_{i}"
+                chroma_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
+
+                chunks.append(ch)
+                metas.append(
+                    {
+                        "source_file": base_name,
+                        "path": logical_paths.get(path, path) if logical_paths else path,
+                        "chunk_id": chunk_id,
+                        "section_id": "",          # surtout pas None
+                        "section_kind": "",
+                        "section_title": "",
+                        "language": language,      # "" si non détectée
+                    }
+                )
+                chroma_ids.append(chroma_id)
+
+        if not chunks:
+            _log.warning(f"[INGEST] No chunks generated for {path}")
+            continue
+
+        # --------------------------------------------------------------
+        # Compute embeddings
+        # --------------------------------------------------------------
+        _log.info(f"[INGEST] Embedding {len(chunks)} chunks for {path}")
+        embeddings = embed_in_batches(
+            texts=chunks,
+            role="doc",          # -> embed_documents côté client
+            batch_size=BATCH_SIZE,
+            emb_client=emb_client,
+            log=_log,
+            dry_run=False,
+        )
+
+        # --------------------------------------------------------------
+        # Push to Chroma in batches (pour éviter "max batch size" > 5461)
+        # --------------------------------------------------------------
+        max_batch = 4000  # en dessous de la limite signalée (5461)
+        n = len(chunks)
+        _log.info(f"[INGEST] Adding {n} embeddings to Chroma in batches of {max_batch}")
+
+        for start in range(0, n, max_batch):
+            end = start + max_batch
+            _log.debug(f"[INGEST] Chroma add batch {start}:{end}")
+            col.add(
+                documents=chunks[start:end],
+                metadatas=metas[start:end],
+                embeddings=embeddings[start:end].tolist(),
+                ids=chroma_ids[start:end],
+            )
+
+        total_chunks += len(chunks)
+        file_reports.append(
+            {
+                "file": base_name,
+                "num_chunks": len(chunks),
+                "language": language,
+                "sections_detected": bool(sections),
+            }
+        )
+
+        # Mise à jour de la progression après traitement complet du fichier
+        processed_count += 1
+        if progress_callback:
+            # 30-100% pour le chunking et embedding
+            progress_fraction = 0.3 + (0.7 * (processed_count / total_loaded))
+            progress_callback(
+                progress_fraction,
+                f"✅ Indexation: {processed_count}/{total_loaded} - {base_name} ({len(chunks)} chunks)"
+            )
+
+    _log.info("[INGEST] Completed")
+
+    # =====================================================================
+    # Nettoyage explicite pour assurer la synchronisation sur stockage réseau
+    # =====================================================================
+    # FAISS sauvegarde automatiquement après chaque add() dans notre implémentation,
+    # mais on garde un délai pour que Windows synchronise les fichiers vers le réseau.
+    # Plus simple que ChromaDB car pas de SQLite = pas de verrous de fichiers!
+
+    try:
+        _log.info("[INGEST] FAISS cleanup for network storage synchronization...")
+
+        # Libérer les ressources Python
+        del col
+        del client
+        gc.collect()
+
+        _log.info("[INGEST] FAISS store closed and resources freed")
+
+        # Délai pour que Windows synchronise les fichiers FAISS vers le réseau
+        # FAISS = fichiers simples, donc délai réduit vs ChromaDB/SQLite
+        _log.info("[INGEST] Waiting 2 seconds for OS to flush data to network storage...")
+        time.sleep(2)
+
+        _log.info("[INGEST] ✅ Database fully synchronized - safe to shut down PC")
+        _log.info("[INGEST] 💡 FAISS fonctionne beaucoup mieux que ChromaDB sur réseau Windows!")
+
+    except Exception as e:
+        _log.warning(f"[INGEST] Error during cleanup (database may still be OK): {e}")
+
+    return {"total_chunks": total_chunks, "files": file_reports}
