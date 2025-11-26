@@ -284,3 +284,149 @@ Décompose cette question si elle contient plusieurs aspects:"""
         _log.warning(f"[SUB-Q] Échec de la décomposition: {e}")
 
     return [question]
+
+
+# =====================================================================
+#  BGE RERANKER
+# =====================================================================
+
+# Configuration du reranker BGE
+BGE_RERANKER_API_BASE = "https://api.dev.dassault-aviation.pro/bge-reranker-v2-m3/v1/"
+BGE_RERANKER_ENDPOINT = "rerank"
+BGE_RERANKER_API_KEY = "EMPTY"  # Peut être configuré si nécessaire
+
+
+def rerank_with_bge(
+    query: str,
+    documents: List[str],
+    top_k: int = None,
+    http_client=None,
+    log=None
+) -> List[Dict[str, Any]]:
+    """
+    Rerank les documents en utilisant le modèle BGE Reranker V2 M3.
+
+    Args:
+        query: La question/requête
+        documents: Liste des documents à reranker
+        top_k: Nombre de documents à retourner (None = tous)
+        http_client: Client HTTP (optionnel, sinon utilise requests)
+        log: Logger optionnel
+
+    Returns:
+        Liste de dicts avec index, document, et score de pertinence
+    """
+    _log = log or logger
+
+    if not documents:
+        return []
+
+    _log.info(f"[RERANK] Reranking {len(documents)} documents avec BGE Reranker...")
+
+    url = f"{BGE_RERANKER_API_BASE}{BGE_RERANKER_ENDPOINT}"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {BGE_RERANKER_API_KEY}"
+    }
+    payload = {
+        "query": query,
+        "documents": documents
+    }
+
+    try:
+        if http_client:
+            resp = http_client.post(url, headers=headers, json=payload, timeout=60.0)
+            resp.raise_for_status()
+            response_data = resp.json()
+        else:
+            import requests
+            resp = requests.post(url, headers=headers, json=payload, timeout=60.0)
+            resp.raise_for_status()
+            response_data = resp.json()
+
+        # Parser la réponse du reranker
+        # Format attendu: {"results": [{"index": 0, "relevance_score": 0.95}, ...]}
+        results = response_data.get("results", [])
+
+        if not results:
+            _log.warning("[RERANK] Pas de résultats du reranker, utilisation de l'ordre original")
+            return [{"index": i, "score": 1.0 - (i * 0.01)} for i in range(len(documents))]
+
+        # Trier par score décroissant
+        sorted_results = sorted(results, key=lambda x: x.get("relevance_score", 0), reverse=True)
+
+        # Formater les résultats
+        reranked = []
+        for r in sorted_results:
+            idx = r.get("index", 0)
+            score = r.get("relevance_score", 0.0)
+            reranked.append({
+                "index": idx,
+                "score": score,
+                "document": documents[idx] if idx < len(documents) else ""
+            })
+
+        if top_k:
+            reranked = reranked[:top_k]
+
+        _log.info(f"[RERANK] ✅ Reranking terminé. Top score: {reranked[0]['score']:.3f}" if reranked else "[RERANK] ✅ Reranking terminé")
+
+        return reranked
+
+    except Exception as e:
+        _log.error(f"[RERANK] ❌ Erreur lors du reranking: {e}")
+        # Fallback: retourner l'ordre original
+        return [{"index": i, "score": 1.0 - (i * 0.01), "document": documents[i]} for i in range(len(documents))]
+
+
+def apply_reranking_to_sources(
+    query: str,
+    sources: List[Dict[str, Any]],
+    top_k: int = 30,
+    http_client=None,
+    log=None
+) -> List[Dict[str, Any]]:
+    """
+    Applique le reranking BGE aux sources RAG.
+
+    Args:
+        query: La question
+        sources: Liste des sources avec leurs métadonnées
+        top_k: Nombre de sources à retourner
+        http_client: Client HTTP optionnel
+        log: Logger optionnel
+
+    Returns:
+        Sources reordonnées avec scores de reranking
+    """
+    _log = log or logger
+
+    if not sources:
+        return sources
+
+    # Extraire les textes des sources
+    documents = [src.get("text", "") for src in sources]
+
+    # Appeler le reranker
+    reranked = rerank_with_bge(
+        query=query,
+        documents=documents,
+        top_k=top_k,
+        http_client=http_client,
+        log=_log
+    )
+
+    # Réordonner les sources selon le reranking
+    reranked_sources = []
+    for r in reranked:
+        idx = r["index"]
+        if idx < len(sources):
+            source = sources[idx].copy()
+            source["rerank_score"] = r["score"]
+            # Mettre à jour le score principal avec le score de reranking
+            source["score"] = r["score"]
+            reranked_sources.append(source)
+
+    _log.info(f"[RERANK] {len(reranked_sources)} sources reordonnées")
+
+    return reranked_sources
