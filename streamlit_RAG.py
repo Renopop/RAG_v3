@@ -833,6 +833,9 @@ with tab_ingest:
                     csv_temp_dir = tempfile.mkdtemp(prefix="rag_ingest_csv_")
                     try:
                         for cf in uploaded_csvs:
+                            # IMPORTANT: Reset file pointer to start before reading
+                            # (detect_xml_files_in_csvs may have read the file earlier)
+                            cf.seek(0)
                             data = cf.read()
 
                             # Optionnel : écriture dans un fichier temporaire (diagnostic / debug)
