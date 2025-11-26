@@ -36,6 +36,7 @@ sentence-transformers>=2.2.0
 # Pour les LLM locaux HuggingFace (transformers)
 transformers>=4.35.0
 torch>=2.0.0
+accelerate>=0.25.0  # Requis pour device_map="auto"
 
 # Pour les LLM locaux au format GGUF (optionnel)
 # llama-cpp-python>=0.2.0
