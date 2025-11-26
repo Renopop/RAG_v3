@@ -468,78 +468,60 @@ if current_user in allowed_users:
         st.markdown("---")
 
         # ═══════════════════════════════════════════════════════════════════
-        # ⚠️ BLOC MODE TEST LOCAL - À SUPPRIMER APRÈS LES TESTS ⚠️
+        # MODE LOCAL - Utilise les chemins de config_manager.py
         # ═══════════════════════════════════════════════════════════════════
-        st.markdown("### 🧪 Mode Test Local")
+        st.markdown("### 🤖 Mode Local")
+
+        # Charger les chemins depuis la configuration
+        from config_manager import get_local_embedding_path, get_local_llm_path, get_local_reranker_path
 
         if "use_local_models" not in st.session_state:
             st.session_state["use_local_models"] = False
-        if "local_embedding_path" not in st.session_state:
-            st.session_state["local_embedding_path"] = "D:\\IA Test\\models\\BAAI\\bge-m3"
-        if "local_llm_path" not in st.session_state:
-            st.session_state["local_llm_path"] = "D:\\IA Test\\models\\Qwen\\Qwen2.5-3B-Instruct"
-        if "local_reranker_path" not in st.session_state:
-            st.session_state["local_reranker_path"] = "D:\\IA Test\\models\\BAAI\\bge-reranker-v2-m3"
+
+        # Récupérer les chemins depuis config.json
+        config_embedding_path = get_local_embedding_path()
+        config_llm_path = get_local_llm_path()
+        config_reranker_path = get_local_reranker_path()
 
         use_local = st.checkbox(
-            "🔧 Activer le mode test local (modèles locaux)",
+            "🔧 Activer le mode local (modèles locaux)",
             value=st.session_state["use_local_models"],
             help="Active l'utilisation de modèles locaux au lieu de Snowflake et DALLEM"
         )
         st.session_state["use_local_models"] = use_local
 
         if use_local:
-            st.warning("⚠️ Mode test local activé - Les modèles Snowflake et DALLEM ne seront PAS utilisés")
+            st.warning("⚠️ Mode local activé - Les modèles Snowflake et DALLEM ne seront PAS utilisés")
 
-            local_embedding_path = st.text_input(
-                "📁 Chemin du modèle d'embedding local",
-                value=st.session_state["local_embedding_path"],
-                placeholder="Ex: sentence-transformers/all-MiniLM-L6-v2 ou /path/to/model",
-                help="Nom du modèle HuggingFace ou chemin local"
-            )
-            st.session_state["local_embedding_path"] = local_embedding_path
-
-            local_llm_path = st.text_input(
-                "📁 Chemin du modèle LLM local",
-                value=st.session_state["local_llm_path"],
-                placeholder="Ex: meta-llama/Llama-2-7b-chat-hf ou /path/to/model.gguf",
-                help="Nom du modèle HuggingFace ou chemin vers un fichier GGUF"
-            )
-            st.session_state["local_llm_path"] = local_llm_path
-
-            local_reranker_path = st.text_input(
-                "📁 Chemin du modèle reranker local",
-                value=st.session_state["local_reranker_path"],
-                placeholder="Ex: BAAI/bge-reranker-v2-m3 ou /path/to/model",
-                help="Modèle cross-encoder pour le reranking (optionnel)"
-            )
-            st.session_state["local_reranker_path"] = local_reranker_path
-
-            if local_embedding_path:
-                st.success(f"✅ Embedding: {local_embedding_path}")
+            # Afficher les chemins configurés (lecture seule, modifiables dans config.json)
+            st.caption("📁 Chemins configurés dans `config.json` :")
+            if config_embedding_path:
+                st.success(f"✅ Embedding: `{config_embedding_path}`")
             else:
-                st.info("ℹ️ Aucun modèle d'embedding spécifié")
+                st.info("ℹ️ Aucun modèle d'embedding configuré")
 
-            if local_llm_path:
-                st.success(f"✅ LLM: {local_llm_path}")
+            if config_llm_path:
+                st.success(f"✅ LLM: `{config_llm_path}`")
             else:
-                st.info("ℹ️ Aucun modèle LLM spécifié")
+                st.info("ℹ️ Aucun modèle LLM configuré")
 
-            if local_reranker_path:
-                st.success(f"✅ Reranker: {local_reranker_path}")
+            if config_reranker_path:
+                st.success(f"✅ Reranker: `{config_reranker_path}`")
             else:
-                st.info("ℹ️ Aucun modèle reranker spécifié (API utilisée)")
+                st.info("ℹ️ Aucun modèle reranker configuré (API utilisée)")
+
+            st.caption("💡 Pour modifier les chemins, éditez `config.json` ou la page de configuration.")
 
             # Activer le mode local dans models_utils
-            set_local_mode(True, local_embedding_path, local_llm_path, local_reranker_path)
+            set_local_mode(True, config_embedding_path, config_llm_path, config_reranker_path)
         else:
             st.caption(f"🔹 Embeddings : **Snowflake** – `{EMBED_MODEL}`")
             st.caption(f"🔹 LLM : **DALLEM** – `{LLM_MODEL}`")
 
             # Désactiver le mode local dans models_utils
-            set_local_mode(False, None, None)
+            set_local_mode(False, None, None, None)
         # ═══════════════════════════════════════════════════════════════════
-        # FIN BLOC MODE TEST LOCAL
+        # FIN MODE LOCAL
         # ═══════════════════════════════════════════════════════════════════
 
 
