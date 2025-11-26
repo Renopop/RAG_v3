@@ -312,11 +312,12 @@ class CSVGeneratorApp(ctk.CTk):
     def add_files(self):
         """Ouvre le file dialog et ajoute les fichiers sélectionnés"""
         filetypes = (
-            ("Tous les fichiers supportés", "*.pdf *.docx *.doc *.txt *.md *.csv"),
+            ("Tous les fichiers supportés", "*.pdf *.docx *.doc *.txt *.md *.csv *.xml"),
             ("PDF", "*.pdf"),
             ("Word", "*.docx *.doc"),
             ("Texte", "*.txt *.md"),
             ("CSV", "*.csv"),
+            ("XML", "*.xml"),
             ("Tous", "*.*")
         )
 
@@ -429,7 +430,7 @@ class CSVGeneratorApp(ctk.CTk):
 
         # Checkboxes pour extensions
         ext_vars = {}
-        extensions = [".pdf", ".docx", ".doc", ".txt", ".md", ".csv"]
+        extensions = [".pdf", ".docx", ".doc", ".txt", ".md", ".csv", ".xml"]
         ext_checks_frame = ctk.CTkFrame(ext_frame)
         ext_checks_frame.pack(fill="x", padx=20, pady=5)
 

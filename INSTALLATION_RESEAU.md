@@ -8,10 +8,9 @@ Ce guide explique comment déployer l'application RaGME_UP - PROP sur un réseau
 
 ### Pourquoi FAISS est parfait pour le réseau Windows
 
-**FAISS remplace ChromaDB** pour une compatibilité réseau optimale :
 - ✅ **Pas de SQLite** = pas de problèmes de verrous de fichiers
 - ✅ **Fichiers simples** = synchronisation réseau Windows transparente
-- ✅ **Plus rapide** = recherche vectorielle optimisée
+- ✅ **Rapide** = recherche vectorielle optimisée
 - ✅ **Multi-utilisateurs** = accès concurrent sans conflit
 - ✅ **Fiable** = sauvegarde automatique après chaque ajout
 
@@ -22,7 +21,7 @@ Ce guide explique comment déployer l'application RaGME_UP - PROP sur un réseau
 ├── streamlit_RAG.py          # Application principale
 ├── csv_generator_gui.py      # Interface GUI pour CSV
 ├── pdf_processing.py          # Traitement PDF robuste
-├── faiss_store.py             # Store FAISS (remplace ChromaDB)
+├── faiss_store.py             # Store FAISS
 ├── rag_ingestion.py           # Ingestion optimisée
 ├── rag_query.py               # Requêtes RAG
 ├── requirements.txt           # Dépendances Python
@@ -142,18 +141,18 @@ mkdir "\\SERVEUR\RAG\FAISS_DATABASE\Fichiers_Tracking_CSV"
 
 ## 🌐 Avantages FAISS sur réseau
 
-### Comparaison ChromaDB vs FAISS
+### Avantages de FAISS
 
-| Fonctionnalité | ChromaDB (ancien) | FAISS (nouveau) |
-|----------------|-------------------|-----------------|
-| Base de données | SQLite (fichier unique) | Fichiers simples (.faiss + .json) |
-| Verrous réseau | ❌ Problèmes fréquents | ✅ Aucun problème |
-| Performance réseau | 🐌 Lent | 🚀 Rapide |
-| Multi-utilisateurs | ⚠️ Conflits possibles | ✅ Sans conflit |
-| Synchronisation | ⚠️ Délais nécessaires | ✅ Immédiate |
-| Espaces dans chemins | ✅ Supportés | ❌ Non supportés (C++) |
+| Fonctionnalité | FAISS |
+|----------------|-------|
+| Base de données | Fichiers simples (.faiss + .json) |
+| Verrous réseau | ✅ Aucun problème |
+| Performance réseau | 🚀 Rapide |
+| Multi-utilisateurs | ✅ Sans conflit |
+| Synchronisation | ✅ Immédiate |
+| Espaces dans chemins | ❌ Non supportés (C++) |
 
-### Pourquoi FAISS est meilleur pour le réseau
+### Pourquoi FAISS est adapté au réseau
 
 1. **Fichiers indépendants** : Chaque collection = 2 fichiers (index.faiss + metadata.json)
 2. **Pas de verrous** : Pas de SQLite = pas de problèmes de "database locked"
@@ -166,8 +165,6 @@ mkdir "\\SERVEUR\RAG\FAISS_DATABASE\Fichiers_Tracking_CSV"
 ## 🔒 Coordination multi-utilisateurs
 
 ### Comment ça fonctionne avec FAISS
-
-**Contrairement à ChromaDB, FAISS n'a pas besoin de verrous complexes :**
 
 ✅ **Lectures parallèles** : Illimitées, aucun conflit
 ✅ **Ingestion séquentielle** : Par design (sauvegarde après chaque batch)
@@ -256,7 +253,7 @@ mkdir "\\SERVEUR\RAG\FAISS_DATABASE\Fichiers_Tracking_CSV"
 **Symptôme :** L'application est lente
 
 **Solutions :**
-- ✅ FAISS est plus rapide que ChromaDB (déjà optimisé)
+- ✅ FAISS est rapide et déjà optimisé
 - Utilisez un lecteur réseau mappé (N:) au lieu de UNC (\\SERVEUR)
 - Vérifiez la bande passante réseau
 - FAISS charge en RAM = requêtes ultra-rapides après premier chargement
@@ -305,15 +302,6 @@ Si `requirements.txt` a changé :
 1. Chaque utilisateur doit relancer `install.bat`
 2. Ou manuellement : `pip install -r requirements.txt --upgrade`
 
-### Migration ChromaDB → FAISS
-
-**Si vous utilisez une ancienne version avec ChromaDB :**
-1. Sauvegardez vos données (export CSV)
-2. Mettez à jour le code
-3. Créez nouvelle structure dossiers FAISS (sans espaces)
-4. Réingérez vos documents via CSV
-5. Supprimez anciennes bases ChromaDB
-
 ---
 
 ## 🎓 Formation des utilisateurs
@@ -353,7 +341,7 @@ Si `requirements.txt` a changé :
 
 NOUVEAUTÉS :
 ✅ FAISS = compatible réseau Windows
-✅ Plus rapide que ChromaDB
+✅ Recherche rapide
 ✅ Extraction pièces jointes PDF automatique
 ✅ Gestion caractères Unicode complexes
 

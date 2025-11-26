@@ -106,7 +106,7 @@ Indexez vos documents dans FAISS pour pouvoir les interroger.
 
 #### 🌐 Compatible partages réseau Windows
 
-**Important** : Le système utilise maintenant FAISS au lieu de ChromaDB pour une **parfaite compatibilité avec les partages réseau Windows** :
+**Important** : Le système utilise FAISS pour une **parfaite compatibilité avec les partages réseau Windows** :
 - ✅ Pas de problèmes de verrous de fichiers SQLite
 - ✅ Synchronisation automatique sur réseau
 - ✅ Multi-utilisateurs sans conflit
@@ -338,7 +338,7 @@ Visualisez les statistiques et tendances des retours utilisateurs.
 
 **Q : Puis-je utiliser l'application sur un partage réseau Windows ?**
 - ✅ **Oui !** FAISS est conçu pour fonctionner parfaitement sur réseau
-- ✅ Pas de problèmes de verrous (contrairement à ChromaDB/SQLite)
+- ✅ Pas de problèmes de verrous de fichiers
 - ✅ Plusieurs utilisateurs peuvent travailler simultanément
 - ✅ Synchronisation automatique des fichiers
 
@@ -369,11 +369,11 @@ Visualisez les statistiques et tendances des retours utilisateurs.
 
 ### Performance
 
-**Q : FAISS est-il plus rapide que ChromaDB ?**
-- ✅ **Oui, nettement plus rapide !**
+**Q : FAISS est-il rapide ?**
+- ✅ **Oui, très rapide !**
 - Recherche vectorielle optimisée
 - Pas de couche SQLite (overhead réduit)
-- Meilleure scalabilité
+- Bonne scalabilité
 
 **Q : Combien de documents puis-je indexer ?**
 - Pas de limite théorique
@@ -382,10 +382,8 @@ Visualisez les statistiques et tendances des retours utilisateurs.
 
 ### Requêtes
 
-**Q : Quelle est la différence entre distance ChromaDB et FAISS ?**
-- ChromaDB utilisait la distance cosinus
+**Q : Comment fonctionne la distance dans FAISS ?**
 - FAISS utilise la distance L2 (euclidienne)
-- Les résultats sont comparables
 - Plus petit score = plus pertinent
 
 ---
@@ -441,10 +439,10 @@ Pour toute question ou problème, contactez l'équipe de développement RaGME_UP
 - 🔍 **Questions similaires** : utilisation des feedbacks de questions passées
 - ⚙️ **Option activable** : checkbox "Utiliser les retours utilisateurs"
 
-### Migration FAISS
-- ✨ **FAISS remplace ChromaDB** pour une meilleure compatibilité réseau Windows
-- 🚀 **Plus rapide** : recherche vectorielle optimisée
-- 🌐 **Compatible réseau** : pas de problèmes de verrous SQLite
+### FAISS
+- ✨ **FAISS** pour une meilleure compatibilité réseau Windows
+- 🚀 **Rapide** : recherche vectorielle optimisée
+- 🌐 **Compatible réseau** : pas de problèmes de verrous
 - 💾 **Auto-save** : sauvegarde après chaque ajout
 
 ### Extraction PDF robuste

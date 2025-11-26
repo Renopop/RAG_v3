@@ -1,5 +1,4 @@
 # Système RAG avec FAISS et Streamlit
-# FAISS remplace ChromaDB pour une meilleure compatibilité réseau Windows
 
 # Interface web Streamlit
 streamlit>=1.28.0
@@ -7,7 +6,7 @@ streamlit>=1.28.0
 # Interface GUI pour création de CSV (CustomTkinter)
 customtkinter>=5.2.0
 
-# Base de données vectorielle - FAISS (remplace ChromaDB)
+# Base de données vectorielle - FAISS
 faiss-cpu>=1.7.4
 # Note: utilisez faiss-gpu si vous avez un GPU CUDA disponible
 
