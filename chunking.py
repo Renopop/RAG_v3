@@ -1473,3 +1473,393 @@ def chunk_easa_sections(
         })
 
     return all_chunks
+
+
+# =====================================================================
+#  CROSS-REFERENCE DETECTION
+# =====================================================================
+
+# Patterns pour détecter les références croisées dans les documents EASA
+CROSS_REF_PATTERNS = [
+    # Références directes: "CS 25.571", "AMC 25.1309", "GM 25.631"
+    re.compile(r'\b(CS|AMC|GM)[-\s]?(\d+(?:\.\d+)*[A-Za-z]?(?:\([a-z0-9]+\))?)', re.IGNORECASE),
+    # Références avec "see": "see CS 25.571", "refer to AMC 25.1309"
+    re.compile(r'(?:see|refer\s+to|in\s+accordance\s+with|as\s+per|per|according\s+to)\s+(CS|AMC|GM)[-\s]?(\d+(?:\.\d+)*)', re.IGNORECASE),
+    # Références FAR/JAR: "FAR 25.571", "JAR 25.571"
+    re.compile(r'\b(FAR|JAR)[-\s]?(\d+(?:\.\d+)*)', re.IGNORECASE),
+    # Références internes: "paragraph (a)", "sub-paragraph (1)"
+    re.compile(r'(?:paragraph|sub-paragraph|section)\s*(\([a-z0-9]+\))', re.IGNORECASE),
+]
+
+
+def extract_cross_references(text: str) -> List[Dict[str, Any]]:
+    """
+    Extrait toutes les références croisées d'un texte.
+
+    Détecte:
+    - Références EASA: CS 25.xxx, AMC, GM
+    - Références FAR/JAR
+    - Références internes: paragraph (a), section (1)
+
+    Args:
+        text: Texte à analyser
+
+    Returns:
+        Liste de dicts avec 'ref_type', 'ref_id', 'full_match', 'position'
+    """
+    if not text:
+        return []
+
+    references = []
+    seen = set()  # Pour éviter les doublons
+
+    for pattern in CROSS_REF_PATTERNS:
+        for match in pattern.finditer(text):
+            groups = match.groups()
+
+            if len(groups) >= 2:
+                ref_type = groups[0].upper()
+                ref_number = groups[1]
+                ref_id = f"{ref_type} {ref_number}".strip()
+            else:
+                ref_type = "internal"
+                ref_id = groups[0] if groups else match.group(0)
+
+            # Normaliser l'ID
+            ref_id_normalized = ref_id.upper().replace(" ", "").replace("-", "")
+
+            if ref_id_normalized not in seen:
+                seen.add(ref_id_normalized)
+                references.append({
+                    "ref_type": ref_type,
+                    "ref_id": ref_id,
+                    "ref_id_normalized": ref_id_normalized,
+                    "full_match": match.group(0),
+                    "position": match.start(),
+                })
+
+    return references
+
+
+def add_cross_references_to_chunk(chunk: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ajoute les références croisées détectées aux métadonnées d'un chunk.
+
+    Args:
+        chunk: Dict avec 'text' et autres métadonnées
+
+    Returns:
+        Chunk enrichi avec 'cross_references' et 'references_to'
+    """
+    text = chunk.get("text", "")
+    refs = extract_cross_references(text)
+
+    # Extraire les IDs de référence uniques
+    ref_ids = list(set(r["ref_id"] for r in refs))
+
+    # Séparer l'ID de section courant des références externes
+    current_section = chunk.get("section_id", "")
+    current_normalized = current_section.upper().replace(" ", "").replace("-", "") if current_section else ""
+
+    # Filtrer pour ne garder que les références vers d'autres sections
+    external_refs = [
+        r for r in refs
+        if r["ref_id_normalized"] != current_normalized
+    ]
+
+    chunk["cross_references"] = refs
+    chunk["references_to"] = [r["ref_id"] for r in external_refs]
+
+    return chunk
+
+
+def add_cross_references_to_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ajoute les références croisées à une liste de chunks.
+    """
+    return [add_cross_references_to_chunk(chunk) for chunk in chunks]
+
+
+def build_reference_index(chunks: List[Dict[str, Any]]) -> Dict[str, List[int]]:
+    """
+    Construit un index inversé des références: ref_id → indices de chunks.
+
+    Permet de retrouver rapidement quels chunks parlent d'une référence donnée.
+
+    Args:
+        chunks: Liste de chunks avec métadonnées
+
+    Returns:
+        Dict mapping ref_id → liste d'indices de chunks
+    """
+    index = {}
+
+    for i, chunk in enumerate(chunks):
+        # Indexer par section_id du chunk
+        section_id = chunk.get("section_id", "")
+        if section_id:
+            normalized = section_id.upper().replace(" ", "").replace("-", "")
+            if normalized not in index:
+                index[normalized] = []
+            if i not in index[normalized]:
+                index[normalized].append(i)
+
+        # Indexer par références mentionnées
+        refs = chunk.get("references_to", [])
+        for ref in refs:
+            normalized = ref.upper().replace(" ", "").replace("-", "")
+            # Note: on n'indexe pas ici car ce sont les chunks qui MENTIONNENT la ref,
+            # pas les chunks qui SONT cette ref
+
+    return index
+
+
+# =====================================================================
+#  QUERY-TIME CONTEXT EXPANSION
+# =====================================================================
+
+def get_neighboring_chunks(
+    chunk_index: int,
+    all_chunks: List[Dict[str, Any]],
+    window: int = 1,
+    same_source_only: bool = True,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Récupère les chunks voisins (précédent et suivant).
+
+    Args:
+        chunk_index: Index du chunk central
+        all_chunks: Liste complète des chunks
+        window: Nombre de chunks avant/après à récupérer
+        same_source_only: Ne prendre que les chunks du même fichier source
+
+    Returns:
+        Dict avec 'previous' et 'next' contenant les chunks voisins
+    """
+    if not all_chunks or chunk_index < 0 or chunk_index >= len(all_chunks):
+        return {"previous": [], "next": []}
+
+    current_chunk = all_chunks[chunk_index]
+    current_source = current_chunk.get("source_file", "") or current_chunk.get("source", "")
+
+    previous = []
+    next_chunks = []
+
+    # Chunks précédents
+    for i in range(1, window + 1):
+        idx = chunk_index - i
+        if idx >= 0:
+            neighbor = all_chunks[idx]
+            neighbor_source = neighbor.get("source_file", "") or neighbor.get("source", "")
+
+            if same_source_only and neighbor_source != current_source:
+                break  # Arrêter si on change de source
+
+            previous.insert(0, neighbor)  # Insérer au début pour garder l'ordre
+
+    # Chunks suivants
+    for i in range(1, window + 1):
+        idx = chunk_index + i
+        if idx < len(all_chunks):
+            neighbor = all_chunks[idx]
+            neighbor_source = neighbor.get("source_file", "") or neighbor.get("source", "")
+
+            if same_source_only and neighbor_source != current_source:
+                break
+
+            next_chunks.append(neighbor)
+
+    return {"previous": previous, "next": next_chunks}
+
+
+def expand_chunk_context(
+    chunk: Dict[str, Any],
+    all_chunks: List[Dict[str, Any]],
+    chunk_index: int,
+    include_neighbors: bool = True,
+    include_referenced: bool = True,
+    neighbor_window: int = 1,
+    reference_index: Optional[Dict[str, List[int]]] = None,
+) -> Dict[str, Any]:
+    """
+    Expanse le contexte d'un chunk avec ses voisins et références.
+
+    Args:
+        chunk: Chunk à enrichir
+        all_chunks: Liste complète des chunks
+        chunk_index: Index du chunk dans la liste
+        include_neighbors: Inclure les chunks voisins
+        include_referenced: Inclure les chunks référencés
+        neighbor_window: Nombre de voisins à inclure
+        reference_index: Index des références (optionnel, sera construit si absent)
+
+    Returns:
+        Dict avec le chunk original + contexte étendu
+    """
+    result = {
+        "chunk": chunk,
+        "neighbors": {"previous": [], "next": []},
+        "referenced_chunks": [],
+        "expanded_text": chunk.get("text", ""),
+    }
+
+    # Ajouter les voisins
+    if include_neighbors:
+        neighbors = get_neighboring_chunks(
+            chunk_index, all_chunks, window=neighbor_window
+        )
+        result["neighbors"] = neighbors
+
+        # Construire le texte étendu avec contexte
+        parts = []
+
+        # Contexte précédent (résumé)
+        if neighbors["previous"]:
+            prev_texts = [c.get("text", "")[:200] + "..." for c in neighbors["previous"]]
+            parts.append(f"[CONTEXTE PRÉCÉDENT]\n{' '.join(prev_texts)}\n")
+
+        # Chunk principal
+        parts.append(f"[CONTENU PRINCIPAL]\n{chunk.get('text', '')}\n")
+
+        # Contexte suivant (résumé)
+        if neighbors["next"]:
+            next_texts = [c.get("text", "")[:200] + "..." for c in neighbors["next"]]
+            parts.append(f"[CONTEXTE SUIVANT]\n{' '.join(next_texts)}")
+
+        result["expanded_text"] = "\n".join(parts)
+
+    # Ajouter les chunks référencés
+    if include_referenced:
+        refs = chunk.get("references_to", [])
+
+        if refs and reference_index is None:
+            reference_index = build_reference_index(all_chunks)
+
+        if refs and reference_index:
+            for ref_id in refs[:5]:  # Limiter à 5 références
+                normalized = ref_id.upper().replace(" ", "").replace("-", "")
+                if normalized in reference_index:
+                    for idx in reference_index[normalized][:2]:  # Max 2 chunks par ref
+                        if idx != chunk_index:  # Ne pas s'inclure soi-même
+                            result["referenced_chunks"].append(all_chunks[idx])
+
+    return result
+
+
+def expand_search_results(
+    results: List[Dict[str, Any]],
+    all_chunks: List[Dict[str, Any]],
+    include_neighbors: bool = True,
+    include_referenced: bool = True,
+    neighbor_window: int = 1,
+) -> List[Dict[str, Any]]:
+    """
+    Expanse le contexte de tous les résultats de recherche.
+
+    Args:
+        results: Résultats de recherche (chunks avec scores)
+        all_chunks: Liste complète des chunks indexés
+        include_neighbors: Inclure les voisins
+        include_referenced: Inclure les références
+        neighbor_window: Fenêtre de voisinage
+
+    Returns:
+        Résultats enrichis avec contexte
+    """
+    if not results or not all_chunks:
+        return results
+
+    # Construire l'index des références une seule fois
+    reference_index = build_reference_index(all_chunks) if include_referenced else None
+
+    # Créer un mapping chunk_id → index pour retrouver rapidement
+    chunk_id_to_index = {}
+    for i, chunk in enumerate(all_chunks):
+        chunk_id = chunk.get("chunk_id", "")
+        if chunk_id:
+            chunk_id_to_index[chunk_id] = i
+
+    expanded_results = []
+
+    for result in results:
+        chunk_id = result.get("chunk_id", "") or result.get("metadata", {}).get("chunk_id", "")
+
+        # Trouver l'index du chunk
+        chunk_index = chunk_id_to_index.get(chunk_id, -1)
+
+        if chunk_index >= 0:
+            expanded = expand_chunk_context(
+                result,
+                all_chunks,
+                chunk_index,
+                include_neighbors=include_neighbors,
+                include_referenced=include_referenced,
+                neighbor_window=neighbor_window,
+                reference_index=reference_index,
+            )
+            result["context_expansion"] = expanded
+            result["expanded_text"] = expanded["expanded_text"]
+
+        expanded_results.append(result)
+
+    return expanded_results
+
+
+def get_related_chunks_by_reference(
+    chunk: Dict[str, Any],
+    all_chunks: List[Dict[str, Any]],
+    max_related: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Trouve les chunks liés par références croisées.
+
+    Si chunk A référence CS 25.571, retourne les chunks qui:
+    1. Sont la section CS 25.571
+    2. Référencent aussi CS 25.571
+
+    Args:
+        chunk: Chunk source
+        all_chunks: Tous les chunks
+        max_related: Nombre max de chunks liés
+
+    Returns:
+        Liste de chunks liés
+    """
+    refs = chunk.get("references_to", [])
+    if not refs:
+        return []
+
+    current_id = chunk.get("chunk_id", "")
+    related = []
+    seen_ids = {current_id}
+
+    # Normaliser les références recherchées
+    target_refs = set(r.upper().replace(" ", "").replace("-", "") for r in refs)
+
+    for other_chunk in all_chunks:
+        other_id = other_chunk.get("chunk_id", "")
+
+        if other_id in seen_ids:
+            continue
+
+        # Vérifier si ce chunk EST une des références
+        other_section = other_chunk.get("section_id", "")
+        if other_section:
+            other_normalized = other_section.upper().replace(" ", "").replace("-", "")
+            if other_normalized in target_refs:
+                related.append(other_chunk)
+                seen_ids.add(other_id)
+                continue
+
+        # Vérifier si ce chunk RÉFÉRENCE les mêmes sections
+        other_refs = other_chunk.get("references_to", [])
+        if other_refs:
+            other_normalized_refs = set(r.upper().replace(" ", "").replace("-", "") for r in other_refs)
+            if target_refs & other_normalized_refs:  # Intersection non vide
+                related.append(other_chunk)
+                seen_ids.add(other_id)
+
+        if len(related) >= max_related:
+            break
+
+    return related

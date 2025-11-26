@@ -33,6 +33,8 @@ from chunking import (
     augment_chunks,
     _calculate_content_density,
     _get_adaptive_chunk_size,
+    add_cross_references_to_chunks,
+    extract_cross_references,
 )
 from easa_sections import split_easa_sections
 
@@ -320,6 +322,9 @@ def ingest_documents(
                 add_density_info=True,
             )
 
+            # Ajouter les cross-références (liens vers autres sections)
+            smart_chunks = add_cross_references_to_chunks(smart_chunks)
+
             _log.info(f"[INGEST] Adaptive chunking: {len(sections)} sections → {len(smart_chunks)} augmented chunks")
 
             for smart_chunk in smart_chunks:
@@ -333,6 +338,7 @@ def ingest_documents(
                 keywords = smart_chunk.get("keywords", [])
                 density_type = smart_chunk.get("density_type", "")
                 density_score = smart_chunk.get("density_score", 0)
+                references_to = smart_chunk.get("references_to", [])
 
                 if not ch:
                     continue
@@ -359,6 +365,8 @@ def ingest_documents(
                         "keywords": keywords[:10] if keywords else [],
                         "density_type": density_type,
                         "density_score": density_score,
+                        # Cross-références vers d'autres sections
+                        "references_to": references_to[:5] if references_to else [],
                     }
                 )
                 faiss_ids.append(faiss_id)
@@ -411,6 +419,9 @@ def ingest_documents(
                 add_density_info=True,
             )
 
+            # Ajouter les cross-références (liens vers autres sections)
+            smart_chunks = add_cross_references_to_chunks(smart_chunks)
+
             _log.info(f"[INGEST] Adaptive generic chunking: {len(smart_chunks)} augmented chunks")
 
             for smart_chunk in smart_chunks:
@@ -422,6 +433,7 @@ def ingest_documents(
                 keywords = smart_chunk.get("keywords", [])
                 density_type = smart_chunk.get("density_type", "")
                 density_score = smart_chunk.get("density_score", 0)
+                references_to = smart_chunk.get("references_to", [])
 
                 if not ch:
                     continue
@@ -443,6 +455,8 @@ def ingest_documents(
                         "keywords": keywords[:10] if keywords else [],
                         "density_type": density_type,
                         "density_score": density_score,
+                        # Cross-références vers d'autres sections
+                        "references_to": references_to[:5] if references_to else [],
                     }
                 )
                 faiss_ids.append(faiss_id)
