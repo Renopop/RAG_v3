@@ -72,7 +72,7 @@ def _run_rag_query_single_collection(
     feedback_store: Optional["FeedbackStore"] = None,
     use_feedback_reranking: bool = False,
     feedback_alpha: float = 0.3,
-    use_query_expansion: bool = False,
+    use_query_expansion: bool = True,
     num_query_variations: int = 3,
     use_bge_reranker: bool = True,
 ) -> Dict[str, Any]:
@@ -318,7 +318,7 @@ def run_rag_query(
     feedback_store: Optional["FeedbackStore"] = None,
     use_feedback_reranking: bool = False,
     feedback_alpha: float = 0.3,
-    use_query_expansion: bool = False,
+    use_query_expansion: bool = True,
     num_query_variations: int = 3,
     use_bge_reranker: bool = True,
 ) -> Dict[str, Any]:

@@ -1397,17 +1397,6 @@ with tab_rag:
         ),
     )
 
-    # Option de recherche avancée (Query Expansion)
-    use_query_expansion = st.checkbox(
-        "🔍 Recherche avancée (Query Expansion)",
-        value=False,
-        help=(
-            "Si activé, le système génère automatiquement des variantes de votre question "
-            "pour améliorer la recherche. Utile pour les questions complexes ou ambiguës. "
-            "Ajoute ~2-3 secondes au temps de recherche."
-        ),
-    )
-
     # Bouton pour poser la question
     if st.button("🤖 Poser la question", help="Recherche les documents pertinents et génère une réponse via DALLEM basée sur le contexte trouvé."):
         if not question.strip():
@@ -1444,7 +1433,7 @@ with tab_rag:
                                 log=logger,
                                 feedback_store=feedback_store if use_feedback_reranking else None,
                                 use_feedback_reranking=use_feedback_reranking,
-                                use_query_expansion=use_query_expansion,
+                                use_query_expansion=True,
                                 use_bge_reranker=True,
                             )
 
@@ -1473,7 +1462,7 @@ with tab_rag:
                                         log=logger,
                                         feedback_store=feedback_store if use_feedback_reranking else None,
                                         use_feedback_reranking=use_feedback_reranking,
-                                        use_query_expansion=use_query_expansion,
+                                        use_query_expansion=True,
                                         use_bge_reranker=True,
                                     )
 
@@ -1498,7 +1487,7 @@ with tab_rag:
                                                 top_k=top_k,
                                                 feedback_store=feedback_store if use_feedback_reranking else None,
                                                 use_feedback_reranking=use_feedback_reranking,
-                                                use_query_expansion=use_query_expansion,
+                                                use_query_expansion=True,
                                                 use_bge_reranker=True,
                                                 log=logger,
                                             )
