@@ -74,7 +74,7 @@ def _run_rag_query_single_collection(
     feedback_alpha: float = 0.3,
     use_query_expansion: bool = False,
     num_query_variations: int = 3,
-    use_bge_reranker: bool = False,
+    use_bge_reranker: bool = True,
 ) -> Dict[str, Any]:
     """
     RAG sur une seule collection.
@@ -320,7 +320,7 @@ def run_rag_query(
     feedback_alpha: float = 0.3,
     use_query_expansion: bool = False,
     num_query_variations: int = 3,
-    use_bge_reranker: bool = False,
+    use_bge_reranker: bool = True,
 ) -> Dict[str, Any]:
     """
     RAG "haut niveau" :
@@ -341,7 +341,7 @@ def run_rag_query(
     Options de recherche avancée :
     - use_query_expansion : génère des variations de la question pour améliorer le recall
     - num_query_variations : nombre de variations à générer (défaut: 3)
-    - use_bge_reranker : applique le reranking BGE après la recherche (défaut: False)
+    - use_bge_reranker : applique le reranking BGE après la recherche (défaut: True)
 
     Options de re-ranking basé sur les feedbacks :
     - feedback_store : instance de FeedbackStore pour accéder aux feedbacks

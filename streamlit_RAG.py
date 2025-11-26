@@ -1408,17 +1408,6 @@ with tab_rag:
         ),
     )
 
-    # Option de re-ranking BGE
-    use_bge_reranker = st.checkbox(
-        "🎯 Re-ranking BGE (Cross-Encoder)",
-        value=False,
-        help=(
-            "Si activé, les résultats de la recherche sont re-classés par un modèle "
-            "cross-encoder BGE qui évalue la pertinence de chaque document par rapport "
-            "à votre question. Améliore la qualité des résultats mais ajoute ~1-2 secondes."
-        ),
-    )
-
     # Bouton pour poser la question
     if st.button("🤖 Poser la question", help="Recherche les documents pertinents et génère une réponse via DALLEM basée sur le contexte trouvé."):
         if not question.strip():
@@ -1445,9 +1434,7 @@ with tab_rag:
 
                     if collection_for_query != "ALL":
                         # RAG sur une collection unique
-                        spinner_msg = "RAG en cours (une collection)…"
-                        if use_query_expansion or use_bge_reranker:
-                            spinner_msg = "🔍 RAG avancé en cours…"
+                        spinner_msg = "🔍 RAG en cours…"
                         with st.spinner(spinner_msg):
                             result = run_rag_query(
                                 db_path=db_path_query,
@@ -1458,7 +1445,7 @@ with tab_rag:
                                 feedback_store=feedback_store if use_feedback_reranking else None,
                                 use_feedback_reranking=use_feedback_reranking,
                                 use_query_expansion=use_query_expansion,
-                                use_bge_reranker=use_bge_reranker,
+                                use_bge_reranker=True,
                             )
 
                         # Stocker le résultat dans session_state
@@ -1475,9 +1462,7 @@ with tab_rag:
                                 st.info(
                                     f"RAG synthétisé sur toutes les collections de la base `{base_for_query}`."
                                 )
-                                spinner_msg = "RAG en cours (ALL, réponse synthétisée)…"
-                                if use_query_expansion or use_bge_reranker:
-                                    spinner_msg = "🔍 RAG avancé en cours (ALL)…"
+                                spinner_msg = "🔍 RAG en cours (ALL)…"
                                 with st.spinner(spinner_msg):
                                     result = run_rag_query(
                                         db_path=db_path_query,
@@ -1489,7 +1474,7 @@ with tab_rag:
                                         feedback_store=feedback_store if use_feedback_reranking else None,
                                         use_feedback_reranking=use_feedback_reranking,
                                         use_query_expansion=use_query_expansion,
-                                        use_bge_reranker=use_bge_reranker,
+                                        use_bge_reranker=True,
                                     )
 
                                 # Stocker le résultat dans session_state
@@ -1502,9 +1487,7 @@ with tab_rag:
                                     + ", ".join(collections_all)
                                 )
                                 all_results = []
-                                spinner_msg = "RAG en cours (toutes les collections, une par une)…"
-                                if use_query_expansion or use_bge_reranker:
-                                    spinner_msg = "🔍 RAG avancé en cours (toutes collections)…"
+                                spinner_msg = "🔍 RAG en cours (toutes collections)…"
                                 with st.spinner(spinner_msg):
                                     for coll in collections_all:
                                         try:
@@ -1516,7 +1499,7 @@ with tab_rag:
                                                 feedback_store=feedback_store if use_feedback_reranking else None,
                                                 use_feedback_reranking=use_feedback_reranking,
                                                 use_query_expansion=use_query_expansion,
-                                                use_bge_reranker=use_bge_reranker,
+                                                use_bge_reranker=True,
                                                 log=logger,
                                             )
                                             all_results.append((coll, res))
