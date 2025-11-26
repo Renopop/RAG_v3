@@ -32,13 +32,17 @@ try:
         expand_query_with_llm,
         run_multi_query_search,
         apply_reranking_to_sources,
+        extract_keywords,
+        filter_sources_by_keywords,
     )
     from models_utils import DALLEM_API_KEY, DALLEM_API_BASE, LLM_MODEL
     ADVANCED_SEARCH_AVAILABLE = True
     BGE_RERANKER_AVAILABLE = True
+    KEYWORD_FILTER_AVAILABLE = True
 except ImportError:
     ADVANCED_SEARCH_AVAILABLE = False
     BGE_RERANKER_AVAILABLE = False
+    KEYWORD_FILTER_AVAILABLE = False
 
 logger = make_logger(debug=False)
 
@@ -276,6 +280,36 @@ def _run_rag_query_single_collection(
             _log.info(f"[RAG] ✅ BGE Reranking applied")
         except Exception as e:
             _log.warning(f"[RAG] BGE Reranking failed, using previous order: {e}")
+
+    # ========== FILTRAGE PAR MOTS-CLÉS ==========
+    if KEYWORD_FILTER_AVAILABLE:
+        _log.info("[RAG] 🔑 Applying keyword filtering...")
+        try:
+            # Extraire les mots-clés de la question
+            keywords = extract_keywords(question, min_length=3, log=_log)
+
+            if keywords:
+                # Filtrer les sources qui contiennent au moins 1 mot-clé
+                sources = filter_sources_by_keywords(
+                    sources=sources,
+                    keywords=keywords,
+                    min_matches=1,
+                    log=_log
+                )
+
+                # Reconstruire le contexte avec les sources filtrées
+                context_blocks = []
+                for src in sources:
+                    kw_info = f", keywords={src.get('keyword_count', 0)}" if 'keyword_count' in src else ""
+                    header = (
+                        f"[source={src['source_file']}, chunk={src['chunk_id']}, "
+                        f"score={src.get('score', 0):.3f}{kw_info}]"
+                    )
+                    context_blocks.append(f"{header}\n{src['text']}")
+
+                _log.info(f"[RAG] ✅ Keyword filtering applied ({len(sources)} sources)")
+        except Exception as e:
+            _log.warning(f"[RAG] Keyword filtering failed: {e}")
 
     full_context = "\n\n".join(context_blocks)
 
