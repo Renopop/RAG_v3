@@ -26,6 +26,20 @@ except ImportError:
     FEEDBACK_AVAILABLE = False
     FeedbackStore = None
 
+# Import du module de recherche avancée
+try:
+    from advanced_search import (
+        expand_query_with_llm,
+        run_multi_query_search,
+        apply_reranking_to_sources,
+    )
+    from models_utils import DALLEM_API_KEY, DALLEM_API_BASE, LLM_MODEL
+    ADVANCED_SEARCH_AVAILABLE = True
+    BGE_RERANKER_AVAILABLE = True
+except ImportError:
+    ADVANCED_SEARCH_AVAILABLE = False
+    BGE_RERANKER_AVAILABLE = False
+
 logger = make_logger(debug=False)
 
 
@@ -58,6 +72,9 @@ def _run_rag_query_single_collection(
     feedback_store: Optional["FeedbackStore"] = None,
     use_feedback_reranking: bool = False,
     feedback_alpha: float = 0.3,
+    use_query_expansion: bool = False,
+    num_query_variations: int = 3,
+    use_bge_reranker: bool = True,
 ) -> Dict[str, Any]:
     """
     RAG sur une seule collection.
@@ -66,6 +83,8 @@ def _run_rag_query_single_collection(
     - Si call_llm=False : retrieval uniquement (retourne context_str & sources, answer vide)
     - Si use_feedback_reranking=True et feedback_store fourni : applique le re-ranking
       basé sur les feedbacks utilisateurs
+    - Si use_query_expansion=True : génère des variations de la question et fusionne les résultats
+    - Si use_bge_reranker=True : applique le reranking BGE après la recherche initiale
     """
     _log = log or logger
 
@@ -92,24 +111,60 @@ def _run_rag_query_single_collection(
         logger=_log,
     )
 
-    # 3) Embedding de la question (role="query")
-    q_emb = embed_in_batches(
-        texts=[question],
-        role="query",
-        batch_size=1,
-        emb_client=emb_client,
-        log=_log,
-        dry_run=False,
-    )[0]
+    # 3) Recherche avec ou sans Query Expansion
+    if use_query_expansion and ADVANCED_SEARCH_AVAILABLE:
+        _log.info(f"[RAG] 🔄 Mode Query Expansion activé ({num_query_variations} variations)")
 
-    # 4) Requête FAISS (simple et fiable sur réseau!)
-    _log.info("[RAG] Querying FAISS index...")
-    raw = collection.query(
-        query_embeddings=[q_emb.tolist()],
-        n_results=top_k,
-        include=["documents", "metadatas", "distances"],
-    )
-    _log.info(f"[RAG] ✅ Query successful (FAISS = no network issues!)")
+        # Générer les variations de la question
+        queries = expand_query_with_llm(
+            question=question,
+            http_client=http_client,
+            api_key=DALLEM_API_KEY,
+            api_base=DALLEM_API_BASE,
+            model=LLM_MODEL,
+            num_variations=num_query_variations,
+            log=_log,
+        )
+
+        # Fonction d'embedding pour multi-query
+        def embed_query(q: str):
+            return embed_in_batches(
+                texts=[q],
+                role="query",
+                batch_size=1,
+                emb_client=emb_client,
+                log=_log,
+                dry_run=False,
+            )[0]
+
+        # Recherche multi-query
+        raw = run_multi_query_search(
+            collection=collection,
+            queries=queries,
+            embed_func=embed_query,
+            top_k=top_k,
+            log=_log,
+        )
+        _log.info(f"[RAG] ✅ Multi-query search completed ({len(queries)} queries)")
+
+    else:
+        # Mode standard: une seule requête
+        q_emb = embed_in_batches(
+            texts=[question],
+            role="query",
+            batch_size=1,
+            emb_client=emb_client,
+            log=_log,
+            dry_run=False,
+        )[0]
+
+        _log.info("[RAG] Querying FAISS index...")
+        raw = collection.query(
+            query_embeddings=[q_emb.tolist()],
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+        )
+        _log.info(f"[RAG] ✅ Query successful")
 
     docs = raw.get("documents", [[]])[0]
     metas = raw.get("metadatas", [[]])[0]
@@ -197,6 +252,31 @@ def _run_rag_query_single_collection(
         except Exception as e:
             _log.warning(f"[RAG] Re-ranking failed, using original order: {e}")
 
+    # ========== RE-RANKING BGE (cross-encoder) ==========
+    if use_bge_reranker and BGE_RERANKER_AVAILABLE:
+        _log.info("[RAG] 🔄 Applying BGE Reranker...")
+        try:
+            sources = apply_reranking_to_sources(
+                query=question,
+                sources=sources,
+                top_k=top_k,
+                http_client=http_client,
+                log=_log
+            )
+
+            # Reconstruire le contexte avec l'ordre des sources reranked
+            context_blocks = []
+            for src in sources:
+                header = (
+                    f"[source={src['source_file']}, chunk={src['chunk_id']}, "
+                    f"rerank_score={src.get('rerank_score', src.get('score', 0)):.3f}]"
+                )
+                context_blocks.append(f"{header}\n{src['text']}")
+
+            _log.info(f"[RAG] ✅ BGE Reranking applied")
+        except Exception as e:
+            _log.warning(f"[RAG] BGE Reranking failed, using previous order: {e}")
+
     full_context = "\n\n".join(context_blocks)
 
     if not call_llm:
@@ -238,6 +318,9 @@ def run_rag_query(
     feedback_store: Optional["FeedbackStore"] = None,
     use_feedback_reranking: bool = False,
     feedback_alpha: float = 0.3,
+    use_query_expansion: bool = False,
+    num_query_variations: int = 3,
+    use_bge_reranker: bool = True,
 ) -> Dict[str, Any]:
     """
     RAG "haut niveau" :
@@ -254,6 +337,11 @@ def run_rag_query(
              → par sécurité, on se contente de lever une erreur ou
                de déléguer à l'appelant (dans ton streamlit, ce cas
                est géré côté interface, pas ici).
+
+    Options de recherche avancée :
+    - use_query_expansion : génère des variations de la question pour améliorer le recall
+    - num_query_variations : nombre de variations à générer (défaut: 3)
+    - use_bge_reranker : applique le reranking BGE après la recherche (défaut: True)
 
     Options de re-ranking basé sur les feedbacks :
     - feedback_store : instance de FeedbackStore pour accéder aux feedbacks
@@ -304,6 +392,9 @@ def run_rag_query(
                     feedback_store=feedback_store,
                     use_feedback_reranking=use_feedback_reranking,
                     feedback_alpha=feedback_alpha,
+                    use_query_expansion=use_query_expansion,
+                    num_query_variations=num_query_variations,
+                    use_bge_reranker=use_bge_reranker,
                 )
             except Exception as e:
                 _log.error(
@@ -362,4 +453,7 @@ def run_rag_query(
         feedback_store=feedback_store,
         use_feedback_reranking=use_feedback_reranking,
         feedback_alpha=feedback_alpha,
+        use_query_expansion=use_query_expansion,
+        num_query_variations=num_query_variations,
+        use_bge_reranker=use_bge_reranker,
     )

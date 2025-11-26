@@ -1240,6 +1240,30 @@ def open_file_callback(file_path: str):
         # Stocker l'erreur dans session_state pour l'afficher
         st.session_state['file_open_error'] = f"Impossible d'ouvrir le fichier : {e}"
 
+
+def is_llm_error_response(answer: str) -> bool:
+    """Vérifie si la réponse est un message d'erreur du LLM."""
+    if not answer:
+        return False
+    error_markers = [
+        "ERREUR DE COMMUNICATION AVEC LE LLM",
+        "Le serveur n'a pas pu répondre",
+        "Veuillez reposer votre question",
+    ]
+    return any(marker in answer for marker in error_markers)
+
+
+def display_answer_with_error_check(answer: str) -> None:
+    """Affiche la réponse avec détection d'erreur et alerte."""
+    if not answer or not answer.strip():
+        st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+    elif is_llm_error_response(answer):
+        st.error(answer)
+        st.info("💡 **Conseil**: Attendez quelques secondes puis cliquez sur 'Rechercher' à nouveau.")
+    else:
+        st.write(answer)
+
+
 def render_sources_list(
     sources: List[Dict],
     global_title: str = "Sources utilisées (triées par pertinence)",
@@ -1373,6 +1397,17 @@ with tab_rag:
         ),
     )
 
+    # Option de recherche avancée (Query Expansion)
+    use_query_expansion = st.checkbox(
+        "🔍 Recherche avancée (Query Expansion)",
+        value=False,
+        help=(
+            "Si activé, le système génère automatiquement des variantes de votre question "
+            "pour améliorer la recherche. Utile pour les questions complexes ou ambiguës. "
+            "Ajoute ~2-3 secondes au temps de recherche."
+        ),
+    )
+
     # Bouton pour poser la question
     if st.button("🤖 Poser la question", help="Recherche les documents pertinents et génère une réponse via DALLEM basée sur le contexte trouvé."):
         if not question.strip():
@@ -1399,7 +1434,8 @@ with tab_rag:
 
                     if collection_for_query != "ALL":
                         # RAG sur une collection unique
-                        with st.spinner("RAG en cours (une collection)…"):
+                        spinner_msg = "🔍 RAG en cours…"
+                        with st.spinner(spinner_msg):
                             result = run_rag_query(
                                 db_path=db_path_query,
                                 collection_name=collection_for_query,
@@ -1408,6 +1444,8 @@ with tab_rag:
                                 log=logger,
                                 feedback_store=feedback_store if use_feedback_reranking else None,
                                 use_feedback_reranking=use_feedback_reranking,
+                                use_query_expansion=use_query_expansion,
+                                use_bge_reranker=True,
                             )
 
                         # Stocker le résultat dans session_state
@@ -1424,7 +1462,8 @@ with tab_rag:
                                 st.info(
                                     f"RAG synthétisé sur toutes les collections de la base `{base_for_query}`."
                                 )
-                                with st.spinner("RAG en cours (ALL, réponse synthétisée)…"):
+                                spinner_msg = "🔍 RAG en cours (ALL)…"
+                                with st.spinner(spinner_msg):
                                     result = run_rag_query(
                                         db_path=db_path_query,
                                         collection_name="ALL",
@@ -1434,6 +1473,8 @@ with tab_rag:
                                         log=logger,
                                         feedback_store=feedback_store if use_feedback_reranking else None,
                                         use_feedback_reranking=use_feedback_reranking,
+                                        use_query_expansion=use_query_expansion,
+                                        use_bge_reranker=True,
                                     )
 
                                 # Stocker le résultat dans session_state
@@ -1446,9 +1487,8 @@ with tab_rag:
                                     + ", ".join(collections_all)
                                 )
                                 all_results = []
-                                with st.spinner(
-                                    "RAG en cours (toutes les collections, une par une)…"
-                                ):
+                                spinner_msg = "🔍 RAG en cours (toutes collections)…"
+                                with st.spinner(spinner_msg):
                                     for coll in collections_all:
                                         try:
                                             res = run_rag_query(
@@ -1458,6 +1498,8 @@ with tab_rag:
                                                 top_k=top_k,
                                                 feedback_store=feedback_store if use_feedback_reranking else None,
                                                 use_feedback_reranking=use_feedback_reranking,
+                                                use_query_expansion=use_query_expansion,
+                                                use_bge_reranker=True,
                                                 log=logger,
                                             )
                                             all_results.append((coll, res))
@@ -1490,10 +1532,7 @@ with tab_rag:
                 f"### 🧠 Réponse (base=`{search_params['base']}`, collection=`{search_params['collection']}`)"
             )
             answer = result.get("answer", "")
-            if answer and answer.strip():
-                st.write(answer)
-            else:
-                st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+            display_answer_with_error_check(answer)
 
             sources = result.get("sources", [])
             sources = sorted(
@@ -1517,10 +1556,7 @@ with tab_rag:
                 f"### 🧠 Réponse synthétisée (base=`{search_params['base']}`, collections=ALL)"
             )
             answer = result.get("answer", "")
-            if answer and answer.strip():
-                st.write(answer)
-            else:
-                st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+            display_answer_with_error_check(answer)
 
             sources = result.get("sources", [])
             sources = sorted(
@@ -1545,10 +1581,7 @@ with tab_rag:
             for coll, result in all_results:
                 st.markdown(f"### 🧠 Réponse – Collection `{coll}`")
                 answer = result.get("answer", "")
-                if answer and answer.strip():
-                    st.write(answer)
-                else:
-                    st.warning("⚠️ Aucune réponse générée par le LLM. Vérifiez la configuration des modèles ou les logs.")
+                display_answer_with_error_check(answer)
 
                 sources = result.get("sources", [])
                 sources = sorted(
