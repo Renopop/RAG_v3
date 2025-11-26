@@ -585,29 +585,21 @@ with tab_ingest:
         st.session_state["detected_xml_files"] = []
 
     def detect_xml_files_in_csvs(csv_files) -> List[str]:
-        """Analyse les CSV uploadés pour trouver les fichiers XML."""
+        """Analyse les CSV uploadés pour trouver les fichiers XML.
+        Utilise la même logique que parse_csv_groups_and_paths pour la compatibilité.
+        """
         xml_files = []
         for cf in csv_files:
             cf.seek(0)
             content = cf.read()
             cf.seek(0)
 
-            # Détecter l'encodage
-            try:
-                text = content.decode("utf-8-sig")
-            except:
-                text = content.decode("latin-1", errors="ignore")
+            # Utiliser la fonction existante pour parser le CSV correctement
+            groups = parse_csv_groups_and_paths(content)
 
-            lines = text.strip().split("\n")
-            delimiter = ";" if ";" in (lines[0] if lines else "") else ","
-
-            # Skip header
-            start_idx = 1 if lines and ("group" in lines[0].lower() or "chemin" in lines[0].lower()) else 0
-
-            for line in lines[start_idx:]:
-                parts = line.strip().split(delimiter)
-                if len(parts) >= 2:
-                    path = parts[1].strip().strip('"')
+            # Parcourir tous les chemins de tous les groupes
+            for group_name, paths in groups.items():
+                for path in paths:
                     if path.lower().endswith(".xml") and os.path.isfile(path):
                         if path not in xml_files:
                             xml_files.append(path)
