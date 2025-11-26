@@ -25,7 +25,7 @@ from pdf_processing import extract_text_from_pdf, extract_attachments_from_pdf
 from docx_processing import extract_text_from_docx
 from csv_processing import extract_text_from_csv
 from xml_processing import extract_text_from_xml, XMLParseConfig
-from chunking import simple_chunk, chunk_easa_sections
+from chunking import simple_chunk, chunk_easa_sections, smart_chunk_generic
 from easa_sections import split_easa_sections
 
 logger = make_logger(debug=False)
@@ -324,16 +324,41 @@ def ingest_documents(
                 faiss_ids.append(faiss_id)
 
         # ==============================================================
-        # CAS 2 — Aucune section EASA : chunking global
+        # CAS 2 — Aucune section EASA : Smart Chunking Générique
         # ==============================================================
         else:
             _log.info(
-                f"[INGEST] No EASA sections detected → global chunking for {path}"
+                f"[INGEST] No EASA sections detected → Smart Generic Chunking for {path}"
             )
-            raw_chunks = simple_chunk(text, chunk_size=chunk_size, overlap=150)
 
-            for i, ch in enumerate(raw_chunks):
-                chunk_id = f"{base_name}_chunk_{i}"
+            # Utiliser le smart chunking générique qui:
+            # - Détecte les titres/headers et les garde avec leur contenu
+            # - Préserve les listes (ne coupe pas au milieu)
+            # - Coupe aux fins de phrases
+            # - Ajoute le contexte source [Source: filename]
+            # - Respecte la structure du document
+            smart_chunks = smart_chunk_generic(
+                text,
+                source_file=base_name,
+                chunk_size=chunk_size + 300,  # +300 pour les préfixes
+                min_chunk_size=200,
+                overlap=100,
+                add_source_prefix=True,
+                preserve_lists=True,
+                preserve_headers=True,
+            )
+
+            _log.info(f"[INGEST] Smart generic chunking: {len(smart_chunks)} chunks")
+
+            for smart_chunk in smart_chunks:
+                ch = smart_chunk.get("text", "")
+                chunk_idx = smart_chunk.get("chunk_index", 0)
+                header = smart_chunk.get("header", "")
+
+                if not ch:
+                    continue
+
+                chunk_id = f"{base_name}_chunk_{chunk_idx}"
                 faiss_id = f"{chunk_id}__{uuid.uuid4().hex[:8]}"
 
                 chunks.append(ch)
@@ -342,10 +367,10 @@ def ingest_documents(
                         "source_file": base_name,
                         "path": logical_paths.get(path, path) if logical_paths else path,
                         "chunk_id": chunk_id,
-                        "section_id": "",          # surtout pas None
-                        "section_kind": "",
-                        "section_title": "",
-                        "language": language,      # "" si non détectée
+                        "section_id": header[:50] if header else "",  # Utiliser le header détecté
+                        "section_kind": smart_chunk.get("type", ""),
+                        "section_title": header if header else "",
+                        "language": language,
                     }
                 )
                 faiss_ids.append(faiss_id)
