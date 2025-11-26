@@ -6,10 +6,607 @@ Chunking utilitaire pour le RAG.
 - Re-colle en blocs d'environ `chunk_size` caractères
 - Ajoute un overlap (chevauchement) pour garder le contexte
 - Smart chunking pour sections EASA avec contexte préservé
+- Chunking adaptatif basé sur la densité du contenu
+- Chunks hiérarchiques parent-enfant
+- Augmentation des chunks avec mots-clés
 """
 
 import re
-from typing import List, Dict, Any, Optional
+import math
+from typing import List, Dict, Any, Optional, Tuple
+from collections import Counter
+
+# =====================================================================
+#  CONSTANTES POUR CHUNKING ADAPTATIF
+# =====================================================================
+
+# Tailles de chunks selon la densité du contenu
+CHUNK_SIZES = {
+    "very_dense": 800,      # Code, formules, tableaux
+    "dense": 1200,          # Technique, spécifications
+    "normal": 1500,         # Texte standard
+    "sparse": 2000,         # Narratif, introductions
+}
+
+# Mots-clés techniques pour détecter la densité
+TECHNICAL_INDICATORS = {
+    # Termes normatifs EASA
+    "shall", "must", "should", "may", "require", "compliance", "applicable",
+    "mandatory", "compliant", "specification", "requirement", "acceptable",
+    # Termes techniques aéronautiques
+    "aircraft", "airworthiness", "certification", "fatigue", "structural",
+    "load", "stress", "failure", "safety", "margin", "factor", "limit",
+    "damage", "tolerance", "inspection", "maintenance", "operation",
+    "flight", "pilot", "crew", "cabin", "cockpit", "fuselage", "wing",
+    "engine", "propeller", "landing", "takeoff", "altitude", "speed",
+    "pressure", "temperature", "hydraulic", "pneumatic", "electrical",
+    "avionics", "navigation", "communication", "performance", "stability",
+    # Termes de design/ingénierie
+    "design", "analysis", "evaluation", "assessment", "verification",
+    "validation", "test", "testing", "measure", "measurement", "criteria",
+    # Termes mathématiques/formules
+    "formula", "equation", "coefficient", "ratio", "value", "parameter",
+    "calculation", "computed", "determined", "maximum", "minimum",
+    # Codes de référence
+    "cs", "amc", "gm", "far", "jar", "easa", "icao", "faa",
+}
+
+# Stopwords français et anglais pour l'extraction de mots-clés
+STOPWORDS = {
+    # Français
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "en",
+    "est", "sont", "être", "avoir", "pour", "par", "avec", "dans", "sur",
+    "ce", "cette", "ces", "qui", "que", "dont", "où", "ne", "pas", "plus",
+    "tout", "tous", "toute", "toutes", "autre", "autres", "même", "aussi",
+    "très", "bien", "peut", "doit", "fait", "faire", "comme", "mais", "si",
+    # Anglais
+    "the", "a", "an", "and", "or", "is", "are", "be", "to", "of", "in",
+    "for", "on", "with", "at", "by", "from", "this", "that", "these",
+    "those", "it", "its", "as", "but", "if", "not", "no", "so", "can",
+    "will", "would", "could", "should", "may", "must", "have", "has",
+    "been", "being", "was", "were", "which", "what", "when", "where",
+}
+
+
+# =====================================================================
+#  ANALYSE DE DENSITÉ DU CONTENU
+# =====================================================================
+
+def _calculate_content_density(text: str) -> Dict[str, Any]:
+    """
+    Analyse la densité du contenu pour adapter la taille des chunks.
+
+    Métriques analysées:
+    - Densité de mots techniques
+    - Ratio de nombres/formules
+    - Longueur moyenne des phrases
+    - Présence de listes/tableaux
+    - Ratio de références (CS xx.xxx, etc.)
+
+    Returns:
+        Dict avec 'density_score', 'density_type', 'metrics'
+    """
+    if not text or len(text) < 50:
+        return {
+            "density_score": 0.5,
+            "density_type": "normal",
+            "metrics": {},
+            "recommended_chunk_size": CHUNK_SIZES["normal"]
+        }
+
+    text_lower = text.lower()
+    words = re.findall(r'\b[a-zA-ZÀ-ÿ]{2,}\b', text_lower)
+    total_words = len(words) if words else 1
+
+    metrics = {}
+
+    # 1. Densité de mots techniques
+    technical_count = sum(1 for w in words if w in TECHNICAL_INDICATORS)
+    metrics["technical_ratio"] = technical_count / total_words
+
+    # 2. Ratio de nombres et formules
+    numbers = re.findall(r'\d+(?:\.\d+)?', text)
+    formulas = re.findall(r'[=<>≤≥±×÷∑∏√∫]', text)
+    metrics["numeric_ratio"] = (len(numbers) + len(formulas) * 3) / max(len(text), 1) * 100
+
+    # 3. Longueur moyenne des phrases
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    avg_sentence_len = sum(len(s) for s in sentences) / max(len(sentences), 1)
+    metrics["avg_sentence_length"] = avg_sentence_len
+
+    # 4. Présence de listes (items numérotés ou à puces)
+    list_items = len(re.findall(r'^\s*[-*•]\s+|\(\s*[a-z0-9]+\s*\)|\b\d+[.)]\s+', text, re.MULTILINE))
+    metrics["list_density"] = list_items / max(len(sentences), 1)
+
+    # 5. Références EASA (CS xx.xxx, AMC, GM)
+    refs = len(re.findall(r'\b(?:CS|AMC|GM)[-\s]?\d+[.\d]*', text, re.IGNORECASE))
+    metrics["reference_density"] = refs / total_words * 100
+
+    # 6. Ratio majuscules (acronymes, titres)
+    upper_words = len(re.findall(r'\b[A-Z]{2,}\b', text))
+    metrics["uppercase_ratio"] = upper_words / total_words
+
+    # 7. Densité de parenthèses/crochets (souvent formules ou références)
+    brackets = len(re.findall(r'[()[\]{}]', text))
+    metrics["bracket_density"] = brackets / max(len(text), 1) * 100
+
+    # Calculer le score de densité (0-1, plus haut = plus dense)
+    density_score = (
+        metrics["technical_ratio"] * 2.0 +
+        min(metrics["numeric_ratio"], 5) / 5 * 1.5 +
+        min(metrics["list_density"], 2) / 2 * 1.0 +
+        min(metrics["reference_density"], 3) / 3 * 1.5 +
+        metrics["uppercase_ratio"] * 1.0 +
+        min(metrics["bracket_density"], 3) / 3 * 1.0 +
+        (1 - min(avg_sentence_len, 200) / 200) * 0.5  # Phrases courtes = plus dense
+    ) / 8.5
+
+    density_score = min(max(density_score, 0), 1)
+
+    # Déterminer le type de densité (seuils ajustés pour documents techniques)
+    if density_score >= 0.5:
+        density_type = "very_dense"
+    elif density_score >= 0.3:
+        density_type = "dense"
+    elif density_score >= 0.15:
+        density_type = "normal"
+    else:
+        density_type = "sparse"
+
+    return {
+        "density_score": round(density_score, 3),
+        "density_type": density_type,
+        "metrics": metrics,
+        "recommended_chunk_size": CHUNK_SIZES[density_type]
+    }
+
+
+def _get_adaptive_chunk_size(
+    text: str,
+    base_size: int = 1500,
+    min_size: int = 600,
+    max_size: int = 2500,
+) -> int:
+    """
+    Calcule la taille optimale de chunk basée sur la densité du contenu.
+
+    Args:
+        text: Texte à analyser
+        base_size: Taille de base
+        min_size: Taille minimum
+        max_size: Taille maximum
+
+    Returns:
+        Taille de chunk recommandée
+    """
+    density_info = _calculate_content_density(text)
+    recommended = density_info["recommended_chunk_size"]
+
+    # Ajuster par rapport à la base fournie
+    ratio = recommended / CHUNK_SIZES["normal"]
+    adjusted_size = int(base_size * ratio)
+
+    return max(min_size, min(adjusted_size, max_size))
+
+
+# =====================================================================
+#  EXTRACTION DE MOTS-CLÉS POUR AUGMENTATION
+# =====================================================================
+
+def _extract_keywords(text: str, max_keywords: int = 10) -> List[str]:
+    """
+    Extrait les mots-clés importants d'un texte.
+
+    Utilise une approche TF simple avec filtrage des stopwords
+    et priorisation des termes techniques.
+
+    Args:
+        text: Texte source
+        max_keywords: Nombre max de mots-clés
+
+    Returns:
+        Liste de mots-clés ordonnés par importance
+    """
+    if not text or len(text) < 20:
+        return []
+
+    # Tokenisation basique
+    words = re.findall(r'\b[a-zA-ZÀ-ÿ]{3,}\b', text.lower())
+
+    # Filtrer les stopwords
+    filtered_words = [w for w in words if w not in STOPWORDS and len(w) >= 3]
+
+    # Compter les fréquences
+    word_counts = Counter(filtered_words)
+
+    # Bonus pour les termes techniques
+    scored_words = {}
+    for word, count in word_counts.items():
+        score = count
+        if word in TECHNICAL_INDICATORS:
+            score *= 2.0
+        # Bonus pour les mots plus longs (souvent plus spécifiques)
+        if len(word) > 8:
+            score *= 1.3
+        scored_words[word] = score
+
+    # Extraire aussi les codes de référence (CS 25.xxx, etc.)
+    refs = re.findall(r'\b(?:CS|AMC|GM)[-\s]?\d+(?:[.\-]\d+)*[A-Za-z]?', text, re.IGNORECASE)
+    ref_keywords = list(set(r.upper().replace(" ", " ") for r in refs))[:3]
+
+    # Trier par score et prendre les top
+    sorted_words = sorted(scored_words.items(), key=lambda x: x[1], reverse=True)
+    keywords = [w for w, _ in sorted_words[:max_keywords - len(ref_keywords)]]
+
+    # Ajouter les références en premier
+    return ref_keywords + keywords
+
+
+def _extract_key_phrases(text: str, max_phrases: int = 5) -> List[str]:
+    """
+    Extrait les phrases ou segments clés d'un texte.
+
+    Returns:
+        Liste de phrases/segments importants
+    """
+    if not text or len(text) < 50:
+        return []
+
+    # Chercher les définitions (contient "means", "is defined", "refers to")
+    definitions = re.findall(
+        r'[^.]*(?:means|is defined as|refers to|shall be|is the)[^.]*\.',
+        text, re.IGNORECASE
+    )
+
+    # Chercher les exigences (contient "shall", "must", "require")
+    requirements = re.findall(
+        r'[^.]*(?:shall|must|require[sd]?|mandatory)[^.]*\.',
+        text, re.IGNORECASE
+    )
+
+    # Combiner et dédupliquer
+    all_phrases = []
+    seen = set()
+
+    for phrase in definitions + requirements:
+        phrase = phrase.strip()
+        if len(phrase) > 20 and len(phrase) < 300 and phrase not in seen:
+            all_phrases.append(phrase)
+            seen.add(phrase)
+            if len(all_phrases) >= max_phrases:
+                break
+
+    return all_phrases
+
+
+# =====================================================================
+#  AUGMENTATION DES CHUNKS
+# =====================================================================
+
+def augment_chunk(
+    chunk: Dict[str, Any],
+    add_keywords: bool = True,
+    add_key_phrases: bool = True,
+    add_density_info: bool = True,
+) -> Dict[str, Any]:
+    """
+    Enrichit un chunk avec des métadonnées pour améliorer la recherche.
+
+    Args:
+        chunk: Dict avec au minimum 'text'
+        add_keywords: Extraire et ajouter les mots-clés
+        add_key_phrases: Extraire les phrases clés
+        add_density_info: Ajouter l'analyse de densité
+
+    Returns:
+        Chunk enrichi avec métadonnées
+    """
+    text = chunk.get("text", "")
+
+    if add_keywords:
+        keywords = _extract_keywords(text)
+        chunk["keywords"] = keywords
+        # Créer une version enrichie du texte pour l'embedding
+        if keywords:
+            keyword_str = " | ".join(keywords[:5])
+            chunk["enriched_text"] = f"[Keywords: {keyword_str}]\n\n{text}"
+
+    if add_key_phrases:
+        key_phrases = _extract_key_phrases(text)
+        chunk["key_phrases"] = key_phrases
+
+    if add_density_info:
+        density = _calculate_content_density(text)
+        chunk["density_type"] = density["density_type"]
+        chunk["density_score"] = density["density_score"]
+
+    return chunk
+
+
+def augment_chunks(chunks: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
+    """
+    Augmente une liste de chunks avec des métadonnées.
+    """
+    return [augment_chunk(chunk, **kwargs) for chunk in chunks]
+
+
+# =====================================================================
+#  CHUNKS HIÉRARCHIQUES PARENT-ENFANT
+# =====================================================================
+
+def create_parent_child_chunks(
+    text: str,
+    source_file: str = "",
+    parent_size: int = 3000,
+    child_size: int = 800,
+    child_overlap: int = 100,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Crée une structure hiérarchique de chunks parent-enfant.
+
+    - Parent: Large contexte pour la compréhension globale
+    - Enfant: Chunks précis pour la recherche
+
+    Le parent est utilisé pour fournir du contexte après récupération
+    des enfants pertinents.
+
+    Args:
+        text: Texte source
+        source_file: Nom du fichier source
+        parent_size: Taille des chunks parent
+        child_size: Taille des chunks enfant
+        child_overlap: Overlap entre chunks enfant
+
+    Returns:
+        Tuple (parent_chunks, child_chunks)
+    """
+    if not text or len(text) < child_size:
+        # Document trop petit - un seul chunk
+        chunk = {
+            "text": text.strip(),
+            "source": source_file,
+            "chunk_id": f"{source_file}_p0",
+            "is_parent": True,
+            "children_ids": [],
+            "chunk_index": 0,
+        }
+        return [chunk], []
+
+    import hashlib
+
+    def generate_chunk_id(content: str, prefix: str = "c") -> str:
+        """Génère un ID unique pour un chunk."""
+        hash_val = hashlib.md5(content[:100].encode()).hexdigest()[:8]
+        return f"{source_file}_{prefix}{hash_val}"
+
+    parent_chunks = []
+    child_chunks = []
+
+    # Créer les chunks parent (larges)
+    parent_raw = simple_chunk(text, chunk_size=parent_size, overlap=200)
+
+    for p_idx, parent_text in enumerate(parent_raw):
+        parent_id = generate_chunk_id(parent_text, f"p{p_idx}_")
+
+        # Créer les chunks enfant pour ce parent
+        children_ids = []
+        child_raw = simple_chunk(parent_text, chunk_size=child_size, overlap=child_overlap)
+
+        for c_idx, child_text in enumerate(child_raw):
+            child_id = generate_chunk_id(child_text, f"c{p_idx}_{c_idx}_")
+            children_ids.append(child_id)
+
+            # Extraire les mots-clés pour l'enfant
+            keywords = _extract_keywords(child_text, max_keywords=8)
+
+            child_chunk = {
+                "text": child_text,
+                "source": source_file,
+                "chunk_id": child_id,
+                "parent_id": parent_id,
+                "is_parent": False,
+                "chunk_index": len(child_chunks),
+                "parent_index": p_idx,
+                "keywords": keywords,
+            }
+
+            # Créer le texte enrichi pour l'embedding
+            if keywords:
+                child_chunk["enriched_text"] = f"[{' | '.join(keywords[:5])}]\n{child_text}"
+
+            child_chunks.append(child_chunk)
+
+        # Créer le chunk parent
+        parent_chunk = {
+            "text": parent_text,
+            "source": source_file,
+            "chunk_id": parent_id,
+            "is_parent": True,
+            "children_ids": children_ids,
+            "chunk_index": p_idx,
+        }
+        parent_chunks.append(parent_chunk)
+
+    return parent_chunks, child_chunks
+
+
+def get_parent_for_child(
+    child_chunk: Dict[str, Any],
+    parent_chunks: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrouve le chunk parent d'un chunk enfant.
+
+    Args:
+        child_chunk: Chunk enfant avec 'parent_id'
+        parent_chunks: Liste des chunks parent
+
+    Returns:
+        Chunk parent ou None
+    """
+    parent_id = child_chunk.get("parent_id")
+    if not parent_id:
+        return None
+
+    for parent in parent_chunks:
+        if parent.get("chunk_id") == parent_id:
+            return parent
+
+    return None
+
+
+# =====================================================================
+#  CHUNKING ADAPTATIF AUTOMATIQUE
+# =====================================================================
+
+def adaptive_smart_chunk(
+    text: str,
+    source_file: str = "",
+    base_chunk_size: int = 1500,
+    enable_hierarchy: bool = True,
+    enable_augmentation: bool = True,
+    enable_density_adaptation: bool = True,
+) -> Dict[str, Any]:
+    """
+    Fonction principale de chunking adaptatif qui combine toutes les techniques.
+
+    Cette fonction analyse automatiquement le contenu et applique:
+    1. Adaptation de taille basée sur la densité
+    2. Structure hiérarchique parent-enfant
+    3. Augmentation avec mots-clés et métadonnées
+    4. Smart chunking selon le type de document
+
+    Args:
+        text: Texte à chunker
+        source_file: Nom du fichier source
+        base_chunk_size: Taille de base (sera adaptée)
+        enable_hierarchy: Créer des chunks parent-enfant
+        enable_augmentation: Ajouter mots-clés et métadonnées
+        enable_density_adaptation: Adapter la taille selon la densité
+
+    Returns:
+        Dict avec:
+        - 'chunks': Liste des chunks principaux (ou enfants si hiérarchie)
+        - 'parent_chunks': Chunks parent (si hiérarchie activée)
+        - 'density_info': Info sur la densité globale
+        - 'config': Configuration utilisée
+    """
+    if not text or len(text.strip()) < 100:
+        return {
+            "chunks": [],
+            "parent_chunks": [],
+            "density_info": None,
+            "config": {"error": "Text too short"}
+        }
+
+    # Analyser la densité globale du document
+    density_info = _calculate_content_density(text)
+
+    # Adapter la taille de chunk selon la densité
+    if enable_density_adaptation:
+        chunk_size = _get_adaptive_chunk_size(
+            text,
+            base_size=base_chunk_size,
+            min_size=600,
+            max_size=2500
+        )
+    else:
+        chunk_size = base_chunk_size
+
+    # Configuration utilisée
+    config = {
+        "base_chunk_size": base_chunk_size,
+        "adapted_chunk_size": chunk_size,
+        "density_type": density_info["density_type"],
+        "hierarchy_enabled": enable_hierarchy,
+        "augmentation_enabled": enable_augmentation,
+    }
+
+    result = {
+        "chunks": [],
+        "parent_chunks": [],
+        "density_info": density_info,
+        "config": config
+    }
+
+    if enable_hierarchy:
+        # Créer une structure hiérarchique
+        parent_size = chunk_size * 2  # Parents 2x plus grands que les enfants
+        child_size = chunk_size
+
+        parent_chunks, child_chunks = create_parent_child_chunks(
+            text,
+            source_file=source_file,
+            parent_size=parent_size,
+            child_size=child_size,
+        )
+
+        if enable_augmentation:
+            child_chunks = augment_chunks(child_chunks)
+            parent_chunks = augment_chunks(parent_chunks, add_key_phrases=False)
+
+        result["chunks"] = child_chunks
+        result["parent_chunks"] = parent_chunks
+
+    else:
+        # Chunking smart standard
+        chunks = smart_chunk_generic(
+            text,
+            source_file=source_file,
+            chunk_size=chunk_size,
+            min_chunk_size=max(200, chunk_size // 5),
+        )
+
+        if enable_augmentation:
+            chunks = augment_chunks(chunks)
+
+        result["chunks"] = chunks
+
+    return result
+
+
+def adaptive_chunk_document(
+    text: str,
+    source_file: str = "",
+    is_easa: bool = False,
+    sections: Optional[List[Dict[str, Any]]] = None,
+    **kwargs
+) -> List[Dict[str, Any]]:
+    """
+    Point d'entrée simplifié pour le chunking adaptatif.
+
+    Détecte automatiquement le type de document et applique
+    la meilleure stratégie de chunking.
+
+    Args:
+        text: Texte à chunker
+        source_file: Nom du fichier source
+        is_easa: True si document EASA avec sections
+        sections: Sections EASA pré-découpées (optionnel)
+        **kwargs: Arguments supplémentaires pour adaptive_smart_chunk
+
+    Returns:
+        Liste de chunks prêts pour l'indexation
+    """
+    if is_easa and sections:
+        # Document EASA - utiliser le chunking spécialisé
+        chunks = chunk_easa_sections(
+            sections,
+            max_chunk_size=kwargs.get("base_chunk_size", 1500),
+        )
+
+        # Augmenter les chunks EASA aussi
+        if kwargs.get("enable_augmentation", True):
+            chunks = augment_chunks(chunks)
+
+        return chunks
+
+    # Document générique - chunking adaptatif complet
+    result = adaptive_smart_chunk(text, source_file=source_file, **kwargs)
+
+    # Retourner les chunks enfants (plus précis pour la recherche)
+    return result["chunks"]
 
 
 def _split_into_paragraphs(text: str) -> List[str]:
