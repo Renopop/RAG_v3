@@ -24,6 +24,7 @@ from models_utils import (
 from pdf_processing import extract_text_from_pdf, extract_attachments_from_pdf
 from docx_processing import extract_text_from_docx
 from csv_processing import extract_text_from_csv
+from xml_processing import extract_text_from_xml, XMLParseConfig
 from chunking import simple_chunk
 from easa_sections import split_easa_sections
 
@@ -47,8 +48,13 @@ def get_or_create_collection(store: FaissStore, name: str):
 #  FILE LOADING
 # =====================================================================
 
-def load_file_content(path: str) -> str:
-    """Load text from a supported file type (PDF, DOCX, CSV, TXT, MD)."""
+def load_file_content(path: str, xml_configs: Optional[Dict[str, XMLParseConfig]] = None) -> str:
+    """Load text from a supported file type (PDF, DOCX, CSV, TXT, MD, XML).
+
+    Args:
+        path: Chemin vers le fichier
+        xml_configs: Dict optionnel {chemin_fichier: XMLParseConfig} pour les fichiers XML
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         return extract_text_from_pdf(path)
@@ -57,6 +63,10 @@ def load_file_content(path: str) -> str:
         return extract_text_from_docx(path)
     if ext == ".csv":
         return extract_text_from_csv(path)
+    if ext == ".xml":
+        # Utiliser la config spécifique si fournie, sinon config par défaut
+        config = xml_configs.get(path) if xml_configs else None
+        return extract_text_from_xml(path, config)
     if ext in (".txt", ".md"):
         # Plain text / Markdown files: read as UTF-8 with tolerant error handling
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -71,12 +81,18 @@ def detect_language(text: str) -> str:
         return "unk"
 
 
+# Variable globale pour stocker les configs XML (utilisée par le worker)
+_xml_configs_global: Optional[Dict[str, XMLParseConfig]] = None
+
+
 def _load_single_file_worker(path: str) -> Dict[str, Any]:
     """
     Worker function for parallel file loading.
     Returns a dict with path, text, language, and error (if any).
     Must be at module level for pickling by multiprocessing.
     """
+    global _xml_configs_global
+
     result = {
         "path": path,
         "text": "",
@@ -89,7 +105,7 @@ def _load_single_file_worker(path: str) -> Dict[str, Any]:
             result["error"] = f"File not found: {path}"
             return result
 
-        text = load_file_content(path)
+        text = load_file_content(path, _xml_configs_global)
 
         if not text.strip():
             result["error"] = f"No text extracted from {path}"
@@ -118,18 +134,24 @@ def ingest_documents(
     log=None,
     logical_paths: Optional[Dict[str, str]] = None,
     progress_callback: Optional[callable] = None,
+    xml_configs: Optional[Dict[str, XMLParseConfig]] = None,
 ) -> Dict[str, Any]:
     """Ingest a list of documents into a FAISS collection.
 
     Steps:
-      - load raw text (PDF / DOCX / CSV)
+      - load raw text (PDF / DOCX / CSV / XML)
       - optionally split into EASA sections
       - chunk text
       - compute embeddings with Snowflake
       - add to FAISS
 
+    Args:
+        xml_configs: Dict optionnel {chemin_fichier: XMLParseConfig} pour les fichiers XML
+
     Returns a small report with total_chunks and per-file info.
     """
+    global _xml_configs_global
+    _xml_configs_global = xml_configs  # Rendre accessible au worker
 
     _log = log or logger
 

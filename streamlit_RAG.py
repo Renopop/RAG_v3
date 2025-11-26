@@ -30,6 +30,14 @@ from models_utils import set_local_mode  # Import pour le mode test local
 from rag_ingestion import ingest_documents, build_faiss_store
 from rag_query import run_rag_query
 from feedback_store import FeedbackStore, create_feedback, QueryFeedback
+from xml_processing import (
+    detect_xml_structure,
+    preview_xml_extraction,
+    get_recommended_config,
+    XMLParseStrategy,
+    XMLParseConfig,
+    STRATEGY_DESCRIPTIONS,
+)
 
 # Optionnel : fonction d'extraction des pièces jointes PDF si disponible
 try:
@@ -564,7 +572,187 @@ with tab_ingest:
     # Récapitulatif des fichiers ingérés pendant cette exécution
     session_ingested_files = []
 
-    if st.button("🚀 Lancer l'ingestion", help="Lance l'ingestion des documents listés dans le CSV uploadé. Les fichiers sont découpés en chunks, vectorisés et indexés dans FAISS."):
+    # ========================================================================
+    # DÉTECTION ET CONFIGURATION DES FICHIERS XML
+    # ========================================================================
+
+    # Initialiser les états de session pour XML
+    if "xml_configs" not in st.session_state:
+        st.session_state["xml_configs"] = {}  # {path: XMLParseConfig}
+    if "xml_preview_validated" not in st.session_state:
+        st.session_state["xml_preview_validated"] = False
+    if "detected_xml_files" not in st.session_state:
+        st.session_state["detected_xml_files"] = []
+
+    def detect_xml_files_in_csvs(csv_files) -> List[str]:
+        """Analyse les CSV uploadés pour trouver les fichiers XML."""
+        xml_files = []
+        for cf in csv_files:
+            cf.seek(0)
+            content = cf.read()
+            cf.seek(0)
+
+            # Détecter l'encodage
+            try:
+                text = content.decode("utf-8-sig")
+            except:
+                text = content.decode("latin-1", errors="ignore")
+
+            lines = text.strip().split("\n")
+            delimiter = ";" if ";" in (lines[0] if lines else "") else ","
+
+            # Skip header
+            start_idx = 1 if lines and ("group" in lines[0].lower() or "chemin" in lines[0].lower()) else 0
+
+            for line in lines[start_idx:]:
+                parts = line.strip().split(delimiter)
+                if len(parts) >= 2:
+                    path = parts[1].strip().strip('"')
+                    if path.lower().endswith(".xml") and os.path.isfile(path):
+                        if path not in xml_files:
+                            xml_files.append(path)
+        return xml_files
+
+    # Détecter les fichiers XML quand des CSV sont uploadés
+    xml_files_detected = []
+    if uploaded_csvs:
+        xml_files_detected = detect_xml_files_in_csvs(uploaded_csvs)
+        st.session_state["detected_xml_files"] = xml_files_detected
+
+    # Afficher l'interface de configuration XML si des fichiers XML sont détectés
+    if xml_files_detected:
+        st.markdown("---")
+        st.markdown("### 📄 Configuration des fichiers XML détectés")
+        st.info(f"**{len(xml_files_detected)} fichier(s) XML** détecté(s). Configurez le parsing avant l'ingestion.")
+
+        # Pour chaque fichier XML, permettre la configuration
+        for xml_path in xml_files_detected:
+            with st.expander(f"📄 {os.path.basename(xml_path)}", expanded=False):
+                st.caption(f"Chemin: `{xml_path}`")
+
+                # Analyser la structure du XML
+                try:
+                    structure = detect_xml_structure(xml_path)
+
+                    if "error" in structure:
+                        st.error(f"Erreur d'analyse: {structure['error']}")
+                        continue
+
+                    # Afficher les infos de structure
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Tags trouvés", len(structure["all_tags"]))
+                    with col2:
+                        st.metric("Éléments", structure["total_elements"])
+                    with col3:
+                        st.metric("Profondeur max", structure["max_depth"])
+
+                    # Sélection de la stratégie de parsing
+                    strategy_key = f"xml_strategy_{xml_path}"
+                    strategy_options = list(STRATEGY_DESCRIPTIONS.keys())
+                    strategy_labels = [f"{s.value} - {STRATEGY_DESCRIPTIONS[s]}" for s in strategy_options]
+
+                    selected_idx = st.selectbox(
+                        "Stratégie de parsing",
+                        range(len(strategy_options)),
+                        format_func=lambda i: strategy_labels[i],
+                        key=strategy_key,
+                        help="Choisissez comment extraire le texte du fichier XML"
+                    )
+                    selected_strategy = strategy_options[selected_idx]
+
+                    # Options additionnelles selon la stratégie
+                    config = XMLParseConfig(strategy=selected_strategy)
+
+                    # Option: filtrer par tags
+                    if selected_strategy == XMLParseStrategy.TAG_FILTERED:
+                        available_tags = structure["all_tags"]
+                        selected_tags = st.multiselect(
+                            "Tags à inclure",
+                            available_tags,
+                            default=available_tags[:5] if len(available_tags) > 5 else available_tags,
+                            key=f"xml_tags_{xml_path}",
+                            help="Sélectionnez les tags dont le contenu sera extrait"
+                        )
+                        config.selected_tags = selected_tags
+
+                    # Option: tags à exclure
+                    exclude_tags = st.multiselect(
+                        "Tags à exclure (optionnel)",
+                        structure["all_tags"],
+                        key=f"xml_exclude_{xml_path}",
+                        help="Ces tags seront ignorés lors de l'extraction"
+                    )
+                    if exclude_tags:
+                        config.excluded_tags = exclude_tags
+
+                    # Options communes
+                    col_opt1, col_opt2 = st.columns(2)
+                    with col_opt1:
+                        config.add_tag_markers = st.checkbox(
+                            "Ajouter marqueurs [TAG]",
+                            value=False,
+                            key=f"xml_markers_{xml_path}",
+                            help="Préfixe chaque bloc de texte avec le nom du tag"
+                        )
+                    with col_opt2:
+                        config.preserve_whitespace = st.checkbox(
+                            "Préserver espaces",
+                            value=False,
+                            key=f"xml_whitespace_{xml_path}",
+                            help="Garde les espaces et retours à la ligne originaux"
+                        )
+
+                    # Bouton de prévisualisation
+                    if st.button(f"👁️ Prévisualiser", key=f"preview_{xml_path}"):
+                        with st.spinner("Génération de la prévisualisation..."):
+                            preview_text, stats = preview_xml_extraction(xml_path, config, max_chars=3000)
+
+                            st.markdown("**📊 Statistiques d'extraction:**")
+                            stat_cols = st.columns(3)
+                            with stat_cols[0]:
+                                st.metric("Caractères", f"{stats['total_chars']:,}")
+                            with stat_cols[1]:
+                                st.metric("Mots", f"{stats['total_words']:,}")
+                            with stat_cols[2]:
+                                st.metric("Lignes", f"{stats['total_lines']:,}")
+
+                            st.markdown("**📝 Aperçu du texte extrait:**")
+                            st.text_area(
+                                "Prévisualisation",
+                                preview_text,
+                                height=300,
+                                key=f"preview_text_{xml_path}",
+                                label_visibility="collapsed"
+                            )
+
+                    # Sauvegarder la configuration
+                    st.session_state["xml_configs"][xml_path] = config
+
+                except Exception as e:
+                    st.error(f"Erreur lors de l'analyse du fichier XML: {e}")
+
+        # Bouton pour valider toutes les configurations
+        if st.button("✅ Valider les configurations XML", type="secondary"):
+            st.session_state["xml_preview_validated"] = True
+            st.success("Configurations XML validées ! Vous pouvez maintenant lancer l'ingestion.")
+
+        # Vérifier si l'utilisateur a validé
+        if not st.session_state["xml_preview_validated"]:
+            st.warning("⚠️ Veuillez configurer et valider les fichiers XML avant de lancer l'ingestion.")
+
+        st.markdown("---")
+
+    # Bouton d'ingestion (conditionné si XML présents)
+    can_ingest = True
+    if xml_files_detected and not st.session_state["xml_preview_validated"]:
+        can_ingest = False
+
+    if st.button(
+        "🚀 Lancer l'ingestion",
+        help="Lance l'ingestion des documents listés dans le CSV uploadé. Les fichiers sont découpés en chunks, vectorisés et indexés dans FAISS.",
+        disabled=not can_ingest
+    ):
         # ------------------------------------------------------------------
         # Charger les CSV de tracking par base existants pour éviter de ré-ingérer
         # des fichiers déjà traités.
@@ -800,6 +988,9 @@ with tab_ingest:
                                 # Appel ingestion avec callback de progression
                                 progress(0.05, f"[{base_name}/{group_name}] Démarrage de l'ingestion…")
                                 try:
+                                    # Récupérer les configs XML depuis session_state
+                                    xml_configs_for_ingestion = st.session_state.get("xml_configs", {})
+
                                     report = ingest_documents(
                                         file_paths=new_paths,
                                         db_path=db_path,
@@ -810,6 +1001,7 @@ with tab_ingest:
                                         log=logger,
                                         logical_paths=logical_paths,
                                         progress_callback=progress,
+                                        xml_configs=xml_configs_for_ingestion,
                                     )
                                     log(
                                         f"[INGEST] OK base={base_name}, collection={group_name}, "
@@ -858,6 +1050,11 @@ with tab_ingest:
                 else:
                     progress(1.0, "✅ Ingestion terminée.")
                     st.success("Ingestion terminée.")
+
+                    # Réinitialiser les états XML après ingestion réussie
+                    st.session_state["xml_preview_validated"] = False
+                    st.session_state["xml_configs"] = {}
+                    st.session_state["detected_xml_files"] = []
 
                     # Récapitulatif des fichiers ingérés pour cette exécution
                     if session_ingested_files:
