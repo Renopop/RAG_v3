@@ -39,8 +39,12 @@ def get_local_embedding_model():
     if _local_embedding_model is None and LOCAL_EMBEDDING_PATH:
         try:
             from sentence_transformers import SentenceTransformer
-            _local_embedding_model = SentenceTransformer(LOCAL_EMBEDDING_PATH)
-            print(f"✅ Modèle d'embedding local chargé: {LOCAL_EMBEDDING_PATH}")
+            import torch
+
+            # Détection automatique du device (CUDA si disponible)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _local_embedding_model = SentenceTransformer(LOCAL_EMBEDDING_PATH, device=device)
+            print(f"✅ Modèle d'embedding local chargé: {LOCAL_EMBEDDING_PATH} (device: {device})")
         except ImportError:
             raise RuntimeError(
                 "sentence-transformers non installé. Installez-le avec: pip install sentence-transformers"
@@ -60,13 +64,28 @@ def get_local_llm_model():
                 # Utiliser llama-cpp-python pour les modèles GGUF
                 try:
                     from llama_cpp import Llama
-                    _local_llm_model = Llama(
-                        model_path=LOCAL_LLM_PATH,
-                        n_ctx=2048,
-                        n_threads=4,
-                        verbose=False
-                    )
-                    print(f"✅ Modèle LLM GGUF chargé: {LOCAL_LLM_PATH}")
+
+                    # Tenter d'activer le GPU (n_gpu_layers=-1 = toutes les couches sur GPU)
+                    # Si CUDA n'est pas disponible, llama-cpp utilisera le CPU
+                    try:
+                        _local_llm_model = Llama(
+                            model_path=LOCAL_LLM_PATH,
+                            n_ctx=2048,
+                            n_threads=4,
+                            n_gpu_layers=-1,  # Utiliser GPU si disponible
+                            verbose=False
+                        )
+                        print(f"✅ Modèle LLM GGUF chargé: {LOCAL_LLM_PATH} (GPU activé)")
+                    except Exception:
+                        # Fallback CPU si GPU non disponible
+                        _local_llm_model = Llama(
+                            model_path=LOCAL_LLM_PATH,
+                            n_ctx=2048,
+                            n_threads=4,
+                            n_gpu_layers=0,
+                            verbose=False
+                        )
+                        print(f"✅ Modèle LLM GGUF chargé: {LOCAL_LLM_PATH} (CPU)")
                 except ImportError:
                     raise RuntimeError(
                         "llama-cpp-python non installé. Installez-le avec: pip install llama-cpp-python"

@@ -631,6 +631,18 @@ with tab_ingest:
         st.session_state["stop_ingestion"] = False
     if "ingestion_running" not in st.session_state:
         st.session_state["ingestion_running"] = False
+    if "created_locks" not in st.session_state:
+        st.session_state["created_locks"] = []
+
+    # Nettoyage des verrous si l'ingestion a été interrompue
+    if st.session_state["stop_ingestion"] and st.session_state["created_locks"]:
+        for base_name in st.session_state["created_locks"]:
+            remove_ingestion_lock(base_root, base_name)
+            logger.info(f"Verrou d'ingestion nettoyé après arrêt pour {base_name}")
+        st.session_state["created_locks"] = []
+        st.session_state["stop_ingestion"] = False
+        st.session_state["ingestion_running"] = False
+        st.rerun()
 
     # Option EASA sections
     if "use_easa_sections" not in st.session_state:
@@ -948,15 +960,18 @@ with tab_ingest:
 
             # Créer les verrous pour toutes les bases
             created_locks = []
+            st.session_state["created_locks"] = []  # Réinitialiser
             for base_name in bases_to_ingest:
                 if create_ingestion_lock(base_root, base_name):
                     created_locks.append(base_name)
+                    st.session_state["created_locks"].append(base_name)  # Sauvegarder pour cleanup
                     logger.info(f"Verrou d'ingestion créé pour {base_name}")
                 else:
                     st.error(f"❌ Impossible de créer le verrou pour la base {base_name}")
                     # Nettoyer les verrous déjà créés
                     for b in created_locks:
                         remove_ingestion_lock(base_root, b)
+                    st.session_state["created_locks"] = []
                     st.stop()
 
             try:
@@ -1296,9 +1311,10 @@ with tab_ingest:
                     remove_ingestion_lock(base_root, base_name)
                     logger.info(f"Verrou d'ingestion supprimé pour {base_name}")
 
-                # Réinitialiser les flags d'ingestion
+                # Réinitialiser les flags d'ingestion et les verrous sauvegardés
                 st.session_state["ingestion_running"] = False
                 st.session_state["stop_ingestion"] = False
+                st.session_state["created_locks"] = []
 
                 # Masquer le bouton stop
                 stop_button_placeholder.empty()
