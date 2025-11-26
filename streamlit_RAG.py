@@ -626,6 +626,12 @@ with tab_ingest:
 
     chunk_size = 1000
 
+    # Initialiser le flag d'arrêt d'ingestion
+    if "stop_ingestion" not in st.session_state:
+        st.session_state["stop_ingestion"] = False
+    if "ingestion_running" not in st.session_state:
+        st.session_state["ingestion_running"] = False
+
     # Option EASA sections
     if "use_easa_sections" not in st.session_state:
         st.session_state["use_easa_sections"] = False
@@ -859,16 +865,31 @@ with tab_ingest:
 
         st.markdown("---")
 
-    # Bouton d'ingestion
+    # Bouton d'ingestion et bouton stop
     can_ingest = True
     if xml_files_detected and not st.session_state["xml_preview_validated"]:
         can_ingest = False
 
-    if st.button(
-        "🚀 Lancer l'ingestion",
-        help="Lance l'ingestion des documents listés dans le CSV uploadé. Les fichiers sont découpés en chunks, vectorisés et indexés dans FAISS.",
-        disabled=not can_ingest
-    ):
+    # Callback pour le bouton stop
+    def stop_ingestion_callback():
+        st.session_state["stop_ingestion"] = True
+
+    # Afficher les boutons côte à côte
+    col_start, col_stop = st.columns([3, 1])
+    with col_start:
+        start_button = st.button(
+            "🚀 Lancer l'ingestion",
+            help="Lance l'ingestion des documents listés dans le CSV. Les fichiers sont découpés en chunks, vectorisés et indexés dans FAISS.",
+            disabled=not can_ingest
+        )
+    with col_stop:
+        # Placeholder pour le bouton stop (visible uniquement pendant l'ingestion)
+        stop_button_placeholder = st.empty()
+
+    if start_button:
+        # Réinitialiser le flag d'arrêt
+        st.session_state["stop_ingestion"] = False
+        st.session_state["ingestion_running"] = True
         # ------------------------------------------------------------------
         # Charger les CSV de tracking par base existants pour éviter de ré-ingérer
         # des fichiers déjà traités.
@@ -944,6 +965,18 @@ with tab_ingest:
                 log_box = st.empty()
                 log_lines: List[str] = []
 
+                # Afficher le bouton stop
+                stop_button_placeholder.button(
+                    "🛑 Stop",
+                    type="secondary",
+                    on_click=stop_ingestion_callback,
+                    key="stop_ingestion_btn"
+                )
+
+                def check_stop() -> bool:
+                    """Vérifie si l'utilisateur a demandé l'arrêt."""
+                    return st.session_state.get("stop_ingestion", False)
+
                 def log(msg: str) -> None:
                     logger.info(msg)
                     log_lines.append(msg)
@@ -956,10 +989,16 @@ with tab_ingest:
                 # ------------------------------------------------------------------
                 # 1) Ingestion à partir des CSV
                 # ------------------------------------------------------------------
+                ingestion_stopped = False
                 if csv_files_to_process:
                     csv_temp_dir = tempfile.mkdtemp(prefix="rag_ingest_csv_")
                     try:
                         for source_type, csv_name, csv_source in csv_files_to_process:
+                            # Vérifier si l'utilisateur a demandé l'arrêt
+                            if check_stop():
+                                log("⚠️ Ingestion interrompue par l'utilisateur")
+                                ingestion_stopped = True
+                                break
                             # Lire le contenu selon la source (locale ou uploadée)
                             if source_type == "local":
                                 with open(csv_source, "rb") as f:
@@ -984,6 +1023,12 @@ with tab_ingest:
                                 existing_entries_by_base[base_name] = load_tracking_csv_for_base(base_name)
     
                             for group_name, paths in groups.items():
+                                # Vérifier si l'utilisateur a demandé l'arrêt
+                                if check_stop():
+                                    log("⚠️ Ingestion interrompue par l'utilisateur")
+                                    ingestion_stopped = True
+                                    break
+
                                 progress(0.05, f"[{base_name}/{group_name}] Validation des chemins…")
                                 new_paths: List[str] = []
                                 missing_paths: List[str] = []
@@ -1093,7 +1138,7 @@ with tab_ingest:
     
                                 ingestion_stats["csv_new_files"] += len(new_paths)
                                 log(
-                                    f"[INGEST] CSV {cf.name} → base={base_name} collection={group_name} "
+                                    f"[INGEST] CSV {csv_name} → base={base_name} collection={group_name} "
                                     f"({len(new_paths)} nouveau(x) fichier(s))"
                                 )
                                 # Ajout dans le récapitulatif uniquement des nouveaux fichiers
@@ -1153,6 +1198,14 @@ with tab_ingest:
                                         log(f"[CLEANUP] Répertoire temporaire pièces jointes supprimé : {temp_dir}")
                                     except Exception as e:
                                         log(f"[CLEANUP] Échec suppression répertoire temporaire {temp_dir} : {e}")
+
+                                # Si arrêt demandé, sortir de la boucle des groupes
+                                if ingestion_stopped:
+                                    break
+
+                            # Si arrêt demandé, sortir de la boucle des CSV
+                            if ingestion_stopped:
+                                break
                     finally:
                         try:
                             shutil.rmtree(csv_temp_dir, ignore_errors=True)
@@ -1165,6 +1218,9 @@ with tab_ingest:
                 # ------------------------------------------------------------------
                 if not csv_files_to_process:
                     st.warning("Aucun CSV d'ingestion sélectionné ou uploadé.")
+                elif ingestion_stopped:
+                    progress(1.0, "⚠️ Ingestion interrompue")
+                    st.warning("⚠️ Ingestion interrompue par l'utilisateur. Les fichiers déjà traités ont été sauvegardés.")
                 else:
                     progress(1.0, "✅ Ingestion terminée.")
                     st.success("Ingestion terminée.")
@@ -1239,6 +1295,13 @@ with tab_ingest:
                 for base_name in created_locks:
                     remove_ingestion_lock(base_root, base_name)
                     logger.info(f"Verrou d'ingestion supprimé pour {base_name}")
+
+                # Réinitialiser les flags d'ingestion
+                st.session_state["ingestion_running"] = False
+                st.session_state["stop_ingestion"] = False
+
+                # Masquer le bouton stop
+                stop_button_placeholder.empty()
 
 
 # ========================
