@@ -423,20 +423,25 @@ def call_dallem_chat(
             llm = get_local_llm_model()
 
             system_msg = (
-                "You are a specialized assistant in aeronautics who responds only based on the provided CONTEXT. "
-                "If the information is not in the context, clearly explain that you cannot answer."
+                "You are an expert assistant in aeronautical regulations. "
+                "You must answer based on the CONTEXT provided below. "
+                "The context contains extracts from normative documents (CS, AMC, GM). "
+                "Always cite the references (CS xx.xxx, AMC, etc.) present in the context."
             )
 
             import textwrap
             user_msg = textwrap.dedent(f"""
-            CONTEXT:
+            === DOCUMENTARY CONTEXT ===
             {context}
+            === END OF CONTEXT ===
 
-            QUESTION:
-            {question}
+            QUESTION: {question}
 
-            Answer in English only, citing elements from the context and the associated CS-type standard if possible.
-            If you don't have enough context to answer, you must respond: I do not have the information to answer your question.
+            INSTRUCTIONS:
+            - Answer in English based on the information from the context above
+            - Cite the normative references (CS, AMC, GM) mentioned in the context
+            - If the context contains relevant information, use it to answer
+            - Only if the context contains NO relevant information, respond: "I do not have the information to answer your question."
             """)
 
             # Génération selon le type de modèle
@@ -492,19 +497,25 @@ def call_dallem_chat(
         raise RuntimeError("DALLEM_API_KEY manquant ou de test. Impossible d'utiliser le LLM.")
 
     system_msg = (
-        "Tu es un assistant spécialisé dans l'aéronautique qui répond uniquement à partir du CONTEXTE fourni. "
-        "Si l'information n'est pas dans le contexte, tu expliques clairement que tu ne peux pas répondre."
+        "Tu es un assistant expert en réglementation aéronautique. "
+        "Tu dois répondre en te basant sur le CONTEXTE fourni ci-dessous. "
+        "Le contexte contient des extraits de documents normatifs (CS, AMC, GM). "
+        "Cite toujours les références (CS xx.xxx, AMC, etc.) présentes dans le contexte."
     )
 
     import textwrap
     user_msg = textwrap.dedent(f"""
-    CONTEXTE :
+    === CONTEXTE DOCUMENTAIRE ===
     {context}
+    === FIN DU CONTEXTE ===
 
-    QUESTION :
-    {question}
+    QUESTION : {question}
 
-    Réponds en anglais uniquement en citant les éléments du contexte et la norme de type CS associée si possible. Si tu n'as pas assez de contexte pour repondre tu dois répondre : I do not have the information to answer your question.
+    INSTRUCTIONS :
+    - Réponds en anglais en te basant sur les informations du contexte ci-dessus
+    - Cite les références normatives (CS, AMC, GM) mentionnées dans le contexte
+    - Si le contexte contient des informations pertinentes, utilise-les pour répondre
+    - Seulement si le contexte ne contient AUCUNE information pertinente, réponds : "I do not have the information to answer your question."
     """)
 
     url = DALLEM_API_BASE.rstrip("/") + "/chat/completions"
@@ -512,12 +523,20 @@ def call_dallem_chat(
         "Authorization": f"Bearer {DALLEM_API_KEY}",
         "Content-Type": "application/json",
     }
+
+    # Log du contexte pour diagnostic
+    log.info(f"[RAG] Contexte: {len(context)} chars, {context.count('[source=')} sources")
+    if not context.strip():
+        log.warning("[RAG] ⚠️ CONTEXTE VIDE - pas de chunks trouvés!")
+
     payload = {
         "model": LLM_MODEL,
         "messages": [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ],
+        "max_tokens": 2000,
+        "temperature": 0.3,
     }
 
     log.info("[RAG] Appel DALLEM /chat/completions pour réponse RAG")
