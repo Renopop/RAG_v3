@@ -1,138 +1,50 @@
 """
-XML Processing Module - Parser intelligent pour fichiers XML
-Permet différentes stratégies d'extraction de texte avec prévisualisation
+XML Processing Module - Parser pour fichiers XML de normes EASA
+Spécialisé pour extraire et découper par sections CS xx.xxx
 """
 
 import os
 import re
 import logging
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
 import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
 
-class XMLParseStrategy(Enum):
-    """Stratégies de parsing XML disponibles"""
-    FULL_TEXT = "full_text"           # Extrait tout le texte (ignore les balises)
-    STRUCTURED = "structured"          # Garde la structure avec indentation
-    TAG_FILTERED = "tag_filtered"      # Filtre par tags spécifiques
-    XPATH_QUERY = "xpath_query"        # Extraction via XPath
-    ATTRIBUTES_INCLUDED = "attributes" # Inclut les attributs dans le texte
+# Pattern pour détecter les sections EASA (CS 25.101, CS-25.101, CS25.101, etc.)
+EASA_SECTION_PATTERN = re.compile(
+    r'(CS[-\s]?\d+[A-Z]?[-.]?\d+(?:\.\d+)?(?:\s*[a-z])?)',
+    re.IGNORECASE
+)
 
 
 @dataclass
 class XMLParseConfig:
     """Configuration pour le parsing XML"""
-    strategy: XMLParseStrategy = XMLParseStrategy.FULL_TEXT
-    selected_tags: Optional[List[str]] = None      # Tags à inclure (pour TAG_FILTERED)
-    excluded_tags: Optional[List[str]] = None      # Tags à exclure
-    xpath_queries: Optional[List[str]] = None      # Requêtes XPath
-    include_attributes: bool = False               # Inclure les attributs
-    preserve_whitespace: bool = False              # Préserver les espaces
-    add_tag_markers: bool = False                  # Ajouter [TAG] devant le contenu
-    separator: str = "\n"                          # Séparateur entre éléments
+    split_by_sections: bool = True           # Découper par sections CS xx.xxx
+    include_section_title: bool = True       # Inclure le titre de section dans le chunk
+    min_section_length: int = 50             # Longueur minimum d'une section (caractères)
+    excluded_tags: List[str] = field(default_factory=list)  # Tags XML à exclure
 
 
-def detect_xml_structure(xml_path: str) -> Dict[str, Any]:
+@dataclass
+class EASASection:
+    """Une section de norme EASA"""
+    code: str           # Ex: "CS 25.101"
+    title: str          # Titre de la section
+    content: str        # Contenu textuel
+    start_pos: int      # Position dans le texte original
+
+
+def extract_text_from_xml(xml_path: str, config: Optional[XMLParseConfig] = None) -> str:
     """
-    Analyse la structure d'un fichier XML et retourne des informations utiles.
-
-    Returns:
-        Dict avec:
-        - root_tag: nom de la balise racine
-        - all_tags: set de tous les tags trouvés
-        - tag_counts: comptage de chaque tag
-        - sample_content: aperçu du contenu par tag
-        - has_namespaces: si le XML utilise des namespaces
-        - encoding: encodage détecté
-    """
-    result = {
-        "root_tag": None,
-        "all_tags": set(),
-        "tag_counts": {},
-        "sample_content": {},
-        "has_namespaces": False,
-        "encoding": "utf-8",
-        "total_elements": 0,
-        "max_depth": 0,
-        "attributes_found": set(),
-    }
-
-    try:
-        # Détecter l'encodage depuis la déclaration XML
-        with open(xml_path, "rb") as f:
-            first_line = f.readline().decode("utf-8", errors="ignore")
-            if "encoding=" in first_line:
-                match = re.search(r'encoding=["\']([^"\']+)["\']', first_line)
-                if match:
-                    result["encoding"] = match.group(1)
-
-        # Parser le XML
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-
-        # Analyser la racine
-        result["root_tag"] = _strip_namespace(root.tag)
-        result["has_namespaces"] = "{" in root.tag
-
-        # Parcourir tous les éléments
-        def analyze_element(elem, depth=0):
-            result["total_elements"] += 1
-            result["max_depth"] = max(result["max_depth"], depth)
-
-            tag_name = _strip_namespace(elem.tag)
-            result["all_tags"].add(tag_name)
-            result["tag_counts"][tag_name] = result["tag_counts"].get(tag_name, 0) + 1
-
-            # Collecter les attributs
-            for attr in elem.attrib.keys():
-                result["attributes_found"].add(f"{tag_name}@{attr}")
-
-            # Sample de contenu (premier non-vide pour chaque tag)
-            if tag_name not in result["sample_content"]:
-                text = (elem.text or "").strip()
-                if text:
-                    result["sample_content"][tag_name] = text[:200] + ("..." if len(text) > 200 else "")
-
-            for child in elem:
-                analyze_element(child, depth + 1)
-
-        analyze_element(root)
-
-        # Convertir le set en liste triée pour JSON
-        result["all_tags"] = sorted(result["all_tags"])
-        result["attributes_found"] = sorted(result["attributes_found"])
-
-    except ET.ParseError as e:
-        logger.error(f"Erreur de parsing XML {xml_path}: {e}")
-        result["error"] = str(e)
-    except Exception as e:
-        logger.error(f"Erreur lors de l'analyse XML {xml_path}: {e}")
-        result["error"] = str(e)
-
-    return result
-
-
-def _strip_namespace(tag: str) -> str:
-    """Retire le namespace d'un tag XML"""
-    if "}" in tag:
-        return tag.split("}")[1]
-    return tag
-
-
-def extract_text_from_xml(
-    xml_path: str,
-    config: Optional[XMLParseConfig] = None
-) -> str:
-    """
-    Extrait le texte d'un fichier XML selon la configuration spécifiée.
+    Extrait le texte d'un fichier XML.
 
     Args:
         xml_path: Chemin vers le fichier XML
-        config: Configuration de parsing (utilise FULL_TEXT par défaut)
+        config: Configuration (optionnelle)
 
     Returns:
         Texte extrait du XML
@@ -143,23 +55,10 @@ def extract_text_from_xml(
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
-
-        if config.strategy == XMLParseStrategy.FULL_TEXT:
-            return _extract_full_text(root, config)
-        elif config.strategy == XMLParseStrategy.STRUCTURED:
-            return _extract_structured(root, config)
-        elif config.strategy == XMLParseStrategy.TAG_FILTERED:
-            return _extract_tag_filtered(root, config)
-        elif config.strategy == XMLParseStrategy.XPATH_QUERY:
-            return _extract_xpath(root, config)
-        elif config.strategy == XMLParseStrategy.ATTRIBUTES_INCLUDED:
-            return _extract_with_attributes(root, config)
-        else:
-            return _extract_full_text(root, config)
-
+        return _extract_all_text(root, config)
     except ET.ParseError as e:
         logger.error(f"Erreur de parsing XML {xml_path}: {e}")
-        # Fallback: essayer de lire comme texte brut
+        # Fallback: lire comme texte brut
         try:
             with open(xml_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
@@ -170,210 +69,221 @@ def extract_text_from_xml(
         return ""
 
 
-def _extract_full_text(root: ET.Element, config: XMLParseConfig) -> str:
-    """Extrait tout le texte, ignore les balises"""
+def _strip_namespace(tag: str) -> str:
+    """Retire le namespace d'un tag XML"""
+    if "}" in tag:
+        return tag.split("}")[1]
+    return tag
+
+
+def _extract_all_text(root: ET.Element, config: XMLParseConfig) -> str:
+    """Extrait tout le texte d'un élément XML"""
     texts = []
 
     def recurse(elem):
         tag_name = _strip_namespace(elem.tag)
 
-        # Vérifier exclusions
-        if config.excluded_tags and tag_name in config.excluded_tags:
+        # Ignorer les tags exclus
+        if tag_name.lower() in [t.lower() for t in config.excluded_tags]:
             return
 
         if elem.text:
-            text = elem.text if config.preserve_whitespace else elem.text.strip()
+            text = elem.text.strip()
             if text:
-                if config.add_tag_markers:
-                    texts.append(f"[{tag_name}] {text}")
-                else:
-                    texts.append(text)
+                texts.append(text)
 
         for child in elem:
             recurse(child)
 
         if elem.tail:
-            tail = elem.tail if config.preserve_whitespace else elem.tail.strip()
+            tail = elem.tail.strip()
             if tail:
                 texts.append(tail)
 
     recurse(root)
-    return config.separator.join(texts)
+    return "\n".join(texts)
 
 
-def _extract_structured(root: ET.Element, config: XMLParseConfig) -> str:
-    """Extrait le texte en gardant une structure indentée"""
-    lines = []
-
-    def recurse(elem, indent=0):
-        tag_name = _strip_namespace(elem.tag)
-
-        if config.excluded_tags and tag_name in config.excluded_tags:
-            return
-
-        prefix = "  " * indent
-
-        # Ajouter le tag
-        text = (elem.text or "").strip() if not config.preserve_whitespace else (elem.text or "")
-        if text:
-            lines.append(f"{prefix}[{tag_name}] {text}")
-        elif len(elem) == 0:
-            # Tag vide sans enfants
-            pass
-        else:
-            lines.append(f"{prefix}[{tag_name}]")
-
-        for child in elem:
-            recurse(child, indent + 1)
-
-    recurse(root)
-    return "\n".join(lines)
-
-
-def _extract_tag_filtered(root: ET.Element, config: XMLParseConfig) -> str:
-    """Extrait uniquement le contenu des tags sélectionnés"""
-    if not config.selected_tags:
-        return _extract_full_text(root, config)
-
-    texts = []
-
-    def recurse(elem):
-        tag_name = _strip_namespace(elem.tag)
-
-        if tag_name in config.selected_tags:
-            # Extraire tout le texte de cet élément et ses enfants
-            full_text = ET.tostring(elem, encoding="unicode", method="text")
-            text = full_text.strip() if not config.preserve_whitespace else full_text
-            if text:
-                if config.add_tag_markers:
-                    texts.append(f"[{tag_name}] {text}")
-                else:
-                    texts.append(text)
-        else:
-            # Continuer à chercher dans les enfants
-            for child in elem:
-                recurse(child)
-
-    recurse(root)
-    return config.separator.join(texts)
-
-
-def _extract_xpath(root: ET.Element, config: XMLParseConfig) -> str:
-    """Extrait le texte via requêtes XPath"""
-    if not config.xpath_queries:
-        return _extract_full_text(root, config)
-
-    texts = []
-
-    for xpath in config.xpath_queries:
-        try:
-            elements = root.findall(xpath)
-            for elem in elements:
-                if isinstance(elem, str):
-                    texts.append(elem)
-                else:
-                    full_text = ET.tostring(elem, encoding="unicode", method="text")
-                    text = full_text.strip() if not config.preserve_whitespace else full_text
-                    if text:
-                        texts.append(text)
-        except Exception as e:
-            logger.warning(f"XPath query failed '{xpath}': {e}")
-
-    return config.separator.join(texts)
-
-
-def _extract_with_attributes(root: ET.Element, config: XMLParseConfig) -> str:
-    """Extrait le texte en incluant les attributs"""
-    texts = []
-
-    def recurse(elem):
-        tag_name = _strip_namespace(elem.tag)
-
-        if config.excluded_tags and tag_name in config.excluded_tags:
-            return
-
-        parts = []
-
-        # Ajouter les attributs
-        if elem.attrib:
-            attr_str = ", ".join([f"{k}={v}" for k, v in elem.attrib.items()])
-            parts.append(f"[{tag_name}: {attr_str}]")
-        elif config.add_tag_markers:
-            parts.append(f"[{tag_name}]")
-
-        # Ajouter le texte
-        if elem.text:
-            text = elem.text if config.preserve_whitespace else elem.text.strip()
-            if text:
-                parts.append(text)
-
-        if parts:
-            texts.append(" ".join(parts))
-
-        for child in elem:
-            recurse(child)
-
-    recurse(root)
-    return config.separator.join(texts)
-
-
-def preview_xml_extraction(
-    xml_path: str,
-    config: XMLParseConfig,
-    max_chars: int = 2000
-) -> Tuple[str, Dict[str, Any]]:
+def detect_easa_sections(text: str) -> List[EASASection]:
     """
-    Génère une prévisualisation de l'extraction XML.
+    Détecte et extrait les sections EASA (CS xx.xxx) dans un texte.
+
+    Args:
+        text: Texte à analyser
+
+    Returns:
+        Liste des sections trouvées
+    """
+    sections = []
+
+    # Trouver tous les marqueurs de section
+    matches = list(EASA_SECTION_PATTERN.finditer(text))
+
+    if not matches:
+        # Pas de sections trouvées, retourner tout le texte comme une seule section
+        return [EASASection(
+            code="DOCUMENT",
+            title="Contenu complet",
+            content=text.strip(),
+            start_pos=0
+        )]
+
+    for i, match in enumerate(matches):
+        code = match.group(1).strip()
+        start_pos = match.start()
+
+        # Fin de la section = début de la suivante ou fin du texte
+        if i + 1 < len(matches):
+            end_pos = matches[i + 1].start()
+        else:
+            end_pos = len(text)
+
+        # Extraire le contenu de la section
+        section_text = text[start_pos:end_pos].strip()
+
+        # Extraire le titre (première ligne après le code)
+        lines = section_text.split('\n')
+        title = ""
+        if len(lines) > 0:
+            # Le titre est souvent sur la même ligne ou la ligne suivante
+            first_line = lines[0].replace(code, "").strip()
+            if first_line:
+                title = first_line[:100]  # Limiter la longueur du titre
+            elif len(lines) > 1:
+                title = lines[1].strip()[:100]
+
+        content = section_text
+
+        sections.append(EASASection(
+            code=code,
+            title=title,
+            content=content,
+            start_pos=start_pos
+        ))
+
+    return sections
+
+
+def analyze_xml_for_easa(xml_path: str) -> Dict[str, Any]:
+    """
+    Analyse un fichier XML pour détecter les sections EASA.
+
+    Returns:
+        Dict avec informations sur le document et les sections trouvées
+    """
+    result = {
+        "file": os.path.basename(xml_path),
+        "total_chars": 0,
+        "sections_count": 0,
+        "sections": [],
+        "error": None
+    }
+
+    try:
+        text = extract_text_from_xml(xml_path)
+        result["total_chars"] = len(text)
+
+        sections = detect_easa_sections(text)
+        result["sections_count"] = len(sections)
+
+        # Résumé des sections
+        for sec in sections:
+            result["sections"].append({
+                "code": sec.code,
+                "title": sec.title[:50] + "..." if len(sec.title) > 50 else sec.title,
+                "length": len(sec.content),
+                "preview": sec.content[:150].replace('\n', ' ') + "..." if len(sec.content) > 150 else sec.content.replace('\n', ' ')
+            })
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def preview_xml_sections(xml_path: str, max_sections: int = 10) -> Tuple[str, Dict[str, Any]]:
+    """
+    Génère une prévisualisation des sections EASA trouvées dans un XML.
+
+    Args:
+        xml_path: Chemin vers le fichier XML
+        max_sections: Nombre max de sections à afficher
 
     Returns:
         Tuple (texte_preview, stats)
     """
-    full_text = extract_text_from_xml(xml_path, config)
+    analysis = analyze_xml_for_easa(xml_path)
 
-    stats = {
-        "total_chars": len(full_text),
-        "total_words": len(full_text.split()),
-        "total_lines": full_text.count("\n") + 1,
-        "strategy": config.strategy.value,
-    }
+    if analysis["error"]:
+        return f"Erreur: {analysis['error']}", analysis
 
-    preview = full_text[:max_chars]
-    if len(full_text) > max_chars:
-        preview += f"\n\n... [Tronqué - {len(full_text) - max_chars} caractères restants]"
+    lines = []
+    lines.append(f"📄 Fichier: {analysis['file']}")
+    lines.append(f"📊 {analysis['total_chars']:,} caractères")
+    lines.append(f"📑 {analysis['sections_count']} section(s) détectée(s)")
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append("SECTIONS TROUVÉES:")
+    lines.append("=" * 50)
 
-    return preview, stats
+    for i, sec in enumerate(analysis["sections"][:max_sections]):
+        lines.append("")
+        lines.append(f"[{i+1}] {sec['code']}")
+        if sec['title']:
+            lines.append(f"    Titre: {sec['title']}")
+        lines.append(f"    Taille: {sec['length']:,} caractères")
+        lines.append(f"    Aperçu: {sec['preview'][:100]}...")
+
+    if analysis["sections_count"] > max_sections:
+        lines.append("")
+        lines.append(f"... et {analysis['sections_count'] - max_sections} autres sections")
+
+    return "\n".join(lines), analysis
+
+
+def get_sections_for_chunking(xml_path: str, config: Optional[XMLParseConfig] = None) -> List[Dict[str, str]]:
+    """
+    Retourne les sections prêtes pour le chunking.
+
+    Chaque section devient un chunk avec:
+    - text: le contenu
+    - metadata: code de section, titre
+
+    Args:
+        xml_path: Chemin vers le fichier XML
+        config: Configuration de parsing
+
+    Returns:
+        Liste de dicts {text, code, title}
+    """
+    if config is None:
+        config = XMLParseConfig()
+
+    text = extract_text_from_xml(xml_path, config)
+    sections = detect_easa_sections(text)
+
+    chunks = []
+    for sec in sections:
+        if len(sec.content) >= config.min_section_length:
+            chunk_text = sec.content
+            if config.include_section_title and sec.title:
+                chunk_text = f"{sec.code} - {sec.title}\n\n{sec.content}"
+
+            chunks.append({
+                "text": chunk_text,
+                "code": sec.code,
+                "title": sec.title
+            })
+
+    return chunks
+
+
+# Pour compatibilité avec l'ancien code
+def detect_xml_structure(xml_path: str) -> Dict[str, Any]:
+    """Analyse la structure d'un fichier XML (compatibilité)"""
+    return analyze_xml_for_easa(xml_path)
 
 
 def get_recommended_config(structure_info: Dict[str, Any]) -> XMLParseConfig:
-    """
-    Suggère une configuration de parsing basée sur l'analyse de la structure.
-    """
-    config = XMLParseConfig()
-
-    # Si beaucoup de tags différents, suggérer STRUCTURED
-    if len(structure_info.get("all_tags", [])) > 20:
-        config.strategy = XMLParseStrategy.STRUCTURED
-        config.add_tag_markers = True
-
-    # Si des attributs importants, suggérer ATTRIBUTES_INCLUDED
-    if len(structure_info.get("attributes_found", [])) > 5:
-        config.strategy = XMLParseStrategy.ATTRIBUTES_INCLUDED
-        config.include_attributes = True
-
-    # Tags courants à exclure par défaut
-    common_metadata_tags = {"meta", "head", "style", "script", "link"}
-    found_metadata = common_metadata_tags.intersection(set(structure_info.get("all_tags", [])))
-    if found_metadata:
-        config.excluded_tags = list(found_metadata)
-
-    return config
-
-
-# Constantes pour les stratégies disponibles (pour l'UI)
-STRATEGY_DESCRIPTIONS = {
-    XMLParseStrategy.FULL_TEXT: "Texte complet - Extrait tout le texte en ignorant les balises",
-    XMLParseStrategy.STRUCTURED: "Structuré - Garde l'indentation et les marqueurs de tags",
-    XMLParseStrategy.TAG_FILTERED: "Filtré par tags - Extrait uniquement les tags sélectionnés",
-    XMLParseStrategy.XPATH_QUERY: "XPath - Extraction via requêtes XPath personnalisées",
-    XMLParseStrategy.ATTRIBUTES_INCLUDED: "Avec attributs - Inclut les attributs XML dans le texte",
-}
+    """Retourne une config par défaut (compatibilité)"""
+    return XMLParseConfig()

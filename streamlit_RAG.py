@@ -31,12 +31,9 @@ from rag_ingestion import ingest_documents, build_faiss_store
 from rag_query import run_rag_query
 from feedback_store import FeedbackStore, create_feedback, QueryFeedback
 from xml_processing import (
-    detect_xml_structure,
-    preview_xml_extraction,
-    get_recommended_config,
-    XMLParseStrategy,
     XMLParseConfig,
-    STRATEGY_DESCRIPTIONS,
+    preview_xml_sections,
+    analyze_xml_for_easa,
 )
 
 # Optionnel : fonction d'extraction des pièces jointes PDF si disponible
@@ -252,28 +249,19 @@ def parse_csv_groups_and_paths(file_bytes: bytes) -> Dict[str, List[str]]:
     # Normaliser les sauts de ligne (Windows \r\n -> \n)
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # Debug logging
-    logger.info(f"[CSV-PARSE] Bytes reçus: {len(file_bytes)}, Caractères décodés: {len(text)}")
-    lines_count = text.count('\n') + (1 if text and not text.endswith('\n') else 0)
-    logger.info(f"[CSV-PARSE] Nombre de lignes détectées: {lines_count}")
-
     # Créer le buffer StringIO
     buf = io.StringIO(text)
 
     # Détecter le délimiteur
-    sample = text[:2048]  # Augmenter la taille de l'échantillon
+    sample = text[:2048]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=";,")
         delimiter = dialect.delimiter
     except Exception:
         delimiter = ";"
 
-    logger.info(f"[CSV-PARSE] Délimiteur détecté: '{delimiter}'")
-
     reader = csv.reader(buf, delimiter=delimiter)
     rows = list(reader)
-
-    logger.info(f"[CSV-PARSE] Nombre de rows parsées par csv.reader: {len(rows)}")
 
     if not rows:
         return {}
@@ -281,8 +269,6 @@ def parse_csv_groups_and_paths(file_bytes: bytes) -> Dict[str, List[str]]:
     header = rows[0]
     header = [h.lstrip("\ufeff") for h in header]
     header_lower = [h.strip().lower() for h in header]
-
-    logger.info(f"[CSV-PARSE] Header détecté: {header_lower}")
 
     if "group" in header_lower and "path" in header_lower:
         idx_group = header_lower.index("group")
@@ -293,25 +279,17 @@ def parse_csv_groups_and_paths(file_bytes: bytes) -> Dict[str, List[str]]:
         idx_path = 1 if len(header) > 1 else 0
         data_rows = rows
 
-    logger.info(f"[CSV-PARSE] Nombre de data rows (sans header): {len(data_rows)}")
-
     groups: Dict[str, List[str]] = {}
-    skipped_rows = 0
     for r in data_rows:
         if len(r) <= max(idx_group, idx_path):
-            skipped_rows += 1
             continue
         g = (r[idx_group] or "").strip().lstrip("\ufeff")
         p = (r[idx_path] or "").strip()
         if not p:
-            skipped_rows += 1
             continue
         if not g:
             g = "ALL"
         groups.setdefault(g, []).append(p)
-
-    total_paths = sum(len(paths) for paths in groups.values())
-    logger.info(f"[CSV-PARSE] Rows ignorées: {skipped_rows}, Total paths extraits: {total_paths}")
 
     return groups
 
@@ -615,19 +593,13 @@ with tab_ingest:
         st.session_state["detected_xml_files"] = []
 
     def detect_xml_files_in_csvs(csv_files) -> List[str]:
-        """Analyse les CSV uploadés pour trouver les fichiers XML.
-        Utilise la même logique que parse_csv_groups_and_paths pour la compatibilité.
-        """
+        """Analyse les CSV uploadés pour trouver les fichiers XML."""
         xml_files = []
         for cf in csv_files:
             cf.seek(0)
             content = cf.read()
             cf.seek(0)
-
-            # Utiliser la fonction existante pour parser le CSV correctement
             groups = parse_csv_groups_and_paths(content)
-
-            # Parcourir tous les chemins de tous les groupes
             for group_name, paths in groups.items():
                 for path in paths:
                     if path.lower().endswith(".xml") and os.path.isfile(path):
@@ -641,131 +613,65 @@ with tab_ingest:
         xml_files_detected = detect_xml_files_in_csvs(uploaded_csvs)
         st.session_state["detected_xml_files"] = xml_files_detected
 
-    # Afficher l'interface de configuration XML si des fichiers XML sont détectés
+    # Afficher l'interface de prévisualisation XML si des fichiers XML sont détectés
     if xml_files_detected:
         st.markdown("---")
-        st.markdown("### 📄 Configuration des fichiers XML détectés")
-        st.info(f"**{len(xml_files_detected)} fichier(s) XML** détecté(s). Configurez le parsing avant l'ingestion.")
+        st.markdown("### 📄 Fichiers XML détectés - Normes EASA")
+        st.info(f"**{len(xml_files_detected)} fichier(s) XML** détecté(s). "
+                "Le parser détecte automatiquement les sections **CS xx.xxx**.")
 
-        # Pour chaque fichier XML, permettre la configuration
         for xml_path in xml_files_detected:
-            with st.expander(f"📄 {os.path.basename(xml_path)}", expanded=False):
-                st.caption(f"Chemin: `{xml_path}`")
-
-                # Analyser la structure du XML
+            with st.expander(f"📄 {os.path.basename(xml_path)}", expanded=True):
                 try:
-                    structure = detect_xml_structure(xml_path)
+                    # Analyser pour les sections EASA
+                    analysis = analyze_xml_for_easa(xml_path)
 
-                    if "error" in structure:
-                        st.error(f"Erreur d'analyse: {structure['error']}")
+                    if analysis.get("error"):
+                        st.error(f"Erreur: {analysis['error']}")
                         continue
 
-                    # Afficher les infos de structure
-                    col1, col2, col3 = st.columns(3)
+                    # Stats
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Tags trouvés", len(structure["all_tags"]))
+                        st.metric("📊 Caractères", f"{analysis['total_chars']:,}")
                     with col2:
-                        st.metric("Éléments", structure["total_elements"])
-                    with col3:
-                        st.metric("Profondeur max", structure["max_depth"])
+                        st.metric("📑 Sections CS détectées", analysis['sections_count'])
 
-                    # Sélection de la stratégie de parsing
-                    strategy_key = f"xml_strategy_{xml_path}"
-                    strategy_options = list(STRATEGY_DESCRIPTIONS.keys())
-                    strategy_labels = [f"{s.value} - {STRATEGY_DESCRIPTIONS[s]}" for s in strategy_options]
+                    # Liste des sections trouvées
+                    if analysis['sections']:
+                        st.markdown("**Sections trouvées:**")
+                        sections_display = []
+                        for sec in analysis['sections'][:15]:  # Max 15 sections affichées
+                            title_part = f" - {sec['title']}" if sec['title'] else ""
+                            sections_display.append(f"• **{sec['code']}**{title_part} ({sec['length']:,} car.)")
 
-                    selected_idx = st.selectbox(
-                        "Stratégie de parsing",
-                        range(len(strategy_options)),
-                        format_func=lambda i: strategy_labels[i],
-                        key=strategy_key,
-                        help="Choisissez comment extraire le texte du fichier XML"
-                    )
-                    selected_strategy = strategy_options[selected_idx]
+                        st.markdown("\n".join(sections_display))
 
-                    # Options additionnelles selon la stratégie
-                    config = XMLParseConfig(strategy=selected_strategy)
+                        if analysis['sections_count'] > 15:
+                            st.caption(f"... et {analysis['sections_count'] - 15} autres sections")
 
-                    # Option: filtrer par tags
-                    if selected_strategy == XMLParseStrategy.TAG_FILTERED:
-                        available_tags = structure["all_tags"]
-                        selected_tags = st.multiselect(
-                            "Tags à inclure",
-                            available_tags,
-                            default=available_tags[:5] if len(available_tags) > 5 else available_tags,
-                            key=f"xml_tags_{xml_path}",
-                            help="Sélectionnez les tags dont le contenu sera extrait"
-                        )
-                        config.selected_tags = selected_tags
+                    # Prévisualisation du texte
+                    if st.button(f"👁️ Voir aperçu complet", key=f"preview_{xml_path}"):
+                        preview_text, _ = preview_xml_sections(xml_path, max_sections=20)
+                        st.text_area("Aperçu", preview_text, height=400, key=f"preview_area_{xml_path}")
 
-                    # Option: tags à exclure
-                    exclude_tags = st.multiselect(
-                        "Tags à exclure (optionnel)",
-                        structure["all_tags"],
-                        key=f"xml_exclude_{xml_path}",
-                        help="Ces tags seront ignorés lors de l'extraction"
-                    )
-                    if exclude_tags:
-                        config.excluded_tags = exclude_tags
-
-                    # Options communes
-                    col_opt1, col_opt2 = st.columns(2)
-                    with col_opt1:
-                        config.add_tag_markers = st.checkbox(
-                            "Ajouter marqueurs [TAG]",
-                            value=False,
-                            key=f"xml_markers_{xml_path}",
-                            help="Préfixe chaque bloc de texte avec le nom du tag"
-                        )
-                    with col_opt2:
-                        config.preserve_whitespace = st.checkbox(
-                            "Préserver espaces",
-                            value=False,
-                            key=f"xml_whitespace_{xml_path}",
-                            help="Garde les espaces et retours à la ligne originaux"
-                        )
-
-                    # Bouton de prévisualisation
-                    if st.button(f"👁️ Prévisualiser", key=f"preview_{xml_path}"):
-                        with st.spinner("Génération de la prévisualisation..."):
-                            preview_text, stats = preview_xml_extraction(xml_path, config, max_chars=3000)
-
-                            st.markdown("**📊 Statistiques d'extraction:**")
-                            stat_cols = st.columns(3)
-                            with stat_cols[0]:
-                                st.metric("Caractères", f"{stats['total_chars']:,}")
-                            with stat_cols[1]:
-                                st.metric("Mots", f"{stats['total_words']:,}")
-                            with stat_cols[2]:
-                                st.metric("Lignes", f"{stats['total_lines']:,}")
-
-                            st.markdown("**📝 Aperçu du texte extrait:**")
-                            st.text_area(
-                                "Prévisualisation",
-                                preview_text,
-                                height=300,
-                                key=f"preview_text_{xml_path}",
-                                label_visibility="collapsed"
-                            )
-
-                    # Sauvegarder la configuration
-                    st.session_state["xml_configs"][xml_path] = config
+                    # Config par défaut
+                    st.session_state["xml_configs"][xml_path] = XMLParseConfig()
 
                 except Exception as e:
-                    st.error(f"Erreur lors de l'analyse du fichier XML: {e}")
+                    st.error(f"Erreur: {e}")
 
-        # Bouton pour valider toutes les configurations
-        if st.button("✅ Valider les configurations XML", type="secondary"):
+        # Validation automatique (plus besoin de bouton complexe)
+        if st.button("✅ Confirmer et continuer", type="primary"):
             st.session_state["xml_preview_validated"] = True
-            st.success("Configurations XML validées ! Vous pouvez maintenant lancer l'ingestion.")
+            st.success("Configuration validée !")
 
-        # Vérifier si l'utilisateur a validé
         if not st.session_state["xml_preview_validated"]:
-            st.warning("⚠️ Veuillez configurer et valider les fichiers XML avant de lancer l'ingestion.")
+            st.warning("⚠️ Cliquez sur 'Confirmer et continuer' pour valider.")
 
         st.markdown("---")
 
-    # Bouton d'ingestion (conditionné si XML présents)
+    # Bouton d'ingestion
     can_ingest = True
     if xml_files_detected and not st.session_state["xml_preview_validated"]:
         can_ingest = False
@@ -803,11 +709,8 @@ with tab_ingest:
                             p_normalized = os.path.normpath(p)
                             if p_normalized != p:
                                 entries[(g, p_normalized)] = True
-                    logger.info(f"[TRACKING] Base '{base_name}': {len(entries)} entrées de tracking (tracking CSV: {csv_path})")
                 except Exception as e:
                     st.error(f"Erreur lors de la lecture du CSV de tracking pour {base_name} : {e}")
-            else:
-                logger.info(f"[TRACKING] Base '{base_name}': Aucun CSV de tracking trouvé (nouvelle base)")
             return entries
 
         # Rien à ingérer ?
@@ -870,47 +773,19 @@ with tab_ingest:
                     csv_temp_dir = tempfile.mkdtemp(prefix="rag_ingest_csv_")
                     try:
                         for cf in uploaded_csvs:
-                            # IMPORTANT: Reset file pointer to start before reading
-                            # (detect_xml_files_in_csvs may have read the file earlier)
                             cf.seek(0)
                             data = cf.read()
 
-                            # Debug: afficher la taille des données lues
-                            log(f"[CSV-READ] Fichier '{cf.name}': {len(data)} bytes lus")
-
-                            # Debug VERBOSE: afficher les premières lignes du CSV brut
-                            try:
-                                raw_preview = data[:1000].decode('utf-8', errors='replace')
-                                log(f"[CSV-RAW] Aperçu du contenu brut (premiers 1000 chars):\n{raw_preview}")
-                            except:
-                                log(f"[CSV-RAW] Impossible de décoder l'aperçu")
-
-                            # Optionnel : écriture dans un fichier temporaire (diagnostic / debug)
-                            tmp_csv_path = os.path.join(csv_temp_dir, cf.name)
-                            try:
-                                with open(tmp_csv_path, "wb") as f_tmp:
-                                    f_tmp.write(data)
-                            except Exception as e:
-                                log(f"[CSV-TMP] Impossible d'écrire le CSV temporaire {tmp_csv_path} : {e}")
-    
                             groups = parse_csv_groups_and_paths(data)
                             if not groups:
                                 st.warning(f"Aucune donnée exploitable dans le CSV {cf.name}")
                                 continue
 
-                            # Debug: afficher le nombre total de fichiers trouvés dans le CSV
                             total_files_in_csv = sum(len(paths) for paths in groups.values())
-                            log(f"[CSV-DEBUG] CSV '{cf.name}': {len(groups)} groupe(s), {total_files_in_csv} fichier(s) total")
-                            for g_name, g_paths in groups.items():
-                                log(f"[CSV-DEBUG]   Groupe '{g_name}': {len(g_paths)} fichier(s)")
-                                # Lister TOUS les fichiers trouvés
-                                for idx, fpath in enumerate(g_paths):
-                                    log(f"[CSV-DEBUG]     [{idx+1}] {fpath}")
-
                             base_name = Path(cf.name).stem
                             db_path = os.path.join(base_root, base_name)
                             os.makedirs(db_path, exist_ok=True)
-                            st.write(f"📂 CSV `{cf.name}` → base `{base_name}` ({total_files_in_csv} fichiers, dossier: {db_path})")
+                            st.write(f"📂 CSV `{cf.name}` → base `{base_name}` ({total_files_in_csv} fichiers)")
     
                             # Charger le CSV de tracking pour cette base
                             if base_name not in existing_entries_by_base:
@@ -934,17 +809,8 @@ with tab_ingest:
                                     key_original = (group_name, p)
                                     if key in existing_entries_by_base[base_name] or key_original in existing_entries_by_base[base_name]:
                                         ingestion_stats["csv_skipped_existing"] += 1
-                                        log(
-                                            f"[SKIP] Déjà présent dans le CSV de tracking : "
-                                            f"base={base_name}, group={group_name}, path={p}"
-                                        )
                                         continue
                                     new_paths.append(p)
-
-                                # Résumé pour ce groupe
-                                skipped_count = len(paths) - len(new_paths) - len(missing_paths)
-                                log(f"[VALIDATION] Groupe '{group_name}': {len(paths)} fichiers dans CSV, "
-                                    f"{len(new_paths)} nouveaux, {skipped_count} déjà ingérés, {len(missing_paths)} introuvables")
 
                                 if missing_paths:
                                     st.warning(
