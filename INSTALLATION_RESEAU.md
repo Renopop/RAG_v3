@@ -20,25 +20,37 @@ Ce guide explique comment déployer l'application RaGME_UP - PROP sur un réseau
 \\SERVEUR\RAG\
 ├── streamlit_RAG.py          # Application principale
 ├── csv_generator_gui.py      # Interface GUI pour CSV
-├── pdf_processing.py          # Traitement PDF robuste
-├── faiss_store.py             # Store FAISS
-├── rag_ingestion.py           # Ingestion optimisée
-├── rag_query.py               # Requêtes RAG
-├── requirements.txt           # Dépendances Python
-├── install.bat                # Script d'installation
-├── launch.bat                 # Script de lancement
-├── GUIDE_UTILISATEUR.md       # Documentation utilisateur
-└── FAISS_DATABASE\            # Dossier partagé pour les données
-    ├── BaseDB\                # Bases FAISS (une par projet)
-    │   ├── normes_easa\       # Exemple: base normes EASA
-    │   │   ├── CS\            # Collection CS
+├── pdf_processing.py         # Traitement PDF (pdfminer + PyMuPDF)
+├── docx_processing.py        # Traitement DOCX (python-docx)
+├── xml_processing.py         # Traitement XML EASA
+├── chunking.py               # Chunking adaptatif intelligent
+├── easa_sections.py          # Parser sections EASA
+├── faiss_store.py            # Store FAISS
+├── rag_ingestion.py          # Ingestion optimisée
+├── rag_query.py              # Requêtes RAG + expansion contexte
+├── config_manager.py         # Gestion configuration
+├── models_utils.py           # Embeddings et LLM
+├── feedback_store.py         # Stockage feedbacks
+├── requirements.txt          # Dépendances Python
+├── install.bat               # Script d'installation
+├── launch.bat                # Script de lancement
+├── config.json               # Configuration utilisateur (généré)
+├── README.md                 # Documentation principale
+├── GUIDE_UTILISATEUR.md      # Documentation utilisateur
+├── INSTALLATION_RESEAU.md    # Ce document
+├── ARCHITECTURE_TECHNIQUE.md # Documentation technique
+└── FAISS_DATABASE\           # Dossier partagé pour les données
+    ├── BaseDB\               # Bases FAISS (une par projet)
+    │   ├── normes_easa\      # Exemple: base normes EASA
+    │   │   ├── CS\           # Collection CS
     │   │   │   ├── index.faiss
     │   │   │   └── metadata.json
-    │   │   ├── AMC\           # Collection AMC
-    │   │   └── GM\            # Collection GM
-    │   └── manuels\           # Exemple: base manuels
-    ├── CSV_Ingestion\         # CSV pour ingestion
-    └── Fichiers_Tracking_CSV\ # CSV de tracking (déduplication)
+    │   │   ├── AMC\          # Collection AMC
+    │   │   └── GM\           # Collection GM
+    │   └── manuels\          # Exemple: base manuels
+    ├── CSV_Ingestion\        # CSV pour ingestion
+    ├── Fichiers_Tracking_CSV\# CSV de tracking (déduplication)
+    └── Feedbacks\            # Feedbacks utilisateurs
 ```
 
 ### ⚠️ Important : Chemins sans espaces
@@ -135,6 +147,56 @@ mkdir "\\SERVEUR\RAG\FAISS_DATABASE"
 mkdir "\\SERVEUR\RAG\FAISS_DATABASE\BaseDB"
 mkdir "\\SERVEUR\RAG\FAISS_DATABASE\CSV_Ingestion"
 mkdir "\\SERVEUR\RAG\FAISS_DATABASE\Fichiers_Tracking_CSV"
+mkdir "\\SERVEUR\RAG\FAISS_DATABASE\Feedbacks"
+```
+
+---
+
+## 🔧 Configuration du Chunking
+
+Le système utilise un chunking adaptatif intelligent. Les paramètres peuvent être personnalisés.
+
+### Paramètres par défaut
+
+| Paramètre | Valeur | Fichier | Description |
+|-----------|--------|---------|-------------|
+| `base_chunk_size` | 1000 | rag_ingestion.py | Taille de base avant adaptation |
+| `min_chunk_size` | 200 | chunking.py | Taille minimale (fusion si inférieur) |
+| `max_chunk_size` | 2000-2500 | rag_ingestion.py | Taille maximale après adaptation |
+| `overlap` | 100 | chunking.py | Chevauchement entre chunks |
+| `merge_small_sections` | True | chunking.py | Fusion sections < 300 caractères |
+
+### Tailles adaptatives par densité de contenu
+
+Le système analyse automatiquement la densité du document :
+
+| Densité | Caractéristiques | Taille chunk |
+|---------|------------------|--------------|
+| `very_dense` | Code, formules, tableaux | 800 caractères |
+| `dense` | Spécifications, listes | 1200 caractères |
+| `normal` | Prose technique | 1500 caractères |
+| `sparse` | Narratif, introductions | 2000 caractères |
+
+### Métriques analysées
+
+- Densité de termes techniques (80+ mots-clés aéronautiques)
+- Ratio nombres/formules dans le texte
+- Longueur moyenne des phrases
+- Présence de listes et tableaux
+- Densité de références (CS, AMC, GM, FAR, JAR)
+- Ratio d'acronymes
+
+### Personnalisation avancée
+
+Pour modifier le comportement, éditez `rag_ingestion.py` (ligne ~180) :
+
+```python
+adapted_chunk_size = _get_adaptive_chunk_size(
+    text,
+    base_size=1000,      # Taille de base (modifier ici)
+    min_size=600,        # Minimum adaptatif (modifier ici)
+    max_size=2000        # Maximum adaptatif (modifier ici)
+)
 ```
 
 ---

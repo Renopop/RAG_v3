@@ -150,38 +150,76 @@ Indexez vos documents dans FAISS pour pouvoir les interroger.
 
 #### 🤖 Que fait l'ingestion automatiquement ?
 
-✅ **Extraction intelligente avec fallback robuste**
-- Extrait le texte des PDF avec pdfminer.six
-- Si échec, utilise PyMuPDF comme fallback (plus robuste)
-- **Extrait les pièces jointes PDF et les ingère automatiquement**
-- Extrait le contenu des DOCX, DOC, TXT, MD, CSV
-- Détecte automatiquement l'encodage des fichiers
-- **Gère les caractères Unicode complexes (surrogates)**
+✅ **Extraction multi-format avec fallback robuste**
+
+| Format | Parser principal | Fallback | Fonctionnalités |
+|--------|-----------------|----------|-----------------|
+| **PDF** | pdfminer.six | PyMuPDF | Pièces jointes, nettoyage Unicode |
+| **DOCX/DOC** | python-docx | - | Tables, sections, paragraphes |
+| **XML** | ElementTree | - | Patterns EASA (CS, AMC, GM) |
+| **TXT/MD** | Lecture native | - | Détection encodage auto |
+| **CSV** | Lecture native | - | Extraction texte brut |
+
+**Fonctionnalités d'extraction :**
+- **Extraction pièces jointes PDF** : Détection récursive des fichiers attachés
+- **Multi-encodage** : UTF-8, UTF-16, Latin-1, ISO-8859-1, CP1252
+- **Nettoyage Unicode** : Suppression automatique des caractères surrogates
+- **Heuristiques qualité** : Détection d'extraction défaillante
 
 ✅ **Traitement parallèle optimisé**
-- Extraction multi-threads pour meilleure performance
-- Compatible Windows avec PyMuPDF (pas de crashes mémoire)
+- ThreadPoolExecutor (compatible Windows + PyMuPDF)
+- Nombre de workers = nombre de CPU
 - Barre de progression en temps réel
+- Gestion d'erreurs par fichier (pas d'interruption globale)
 
-✅ **Détection EASA**
-- Détecte les sections CS, AMC, GM automatiquement
-- Exemple : `CS 25.613 Fatigue evaluation`
-- Stocke les métadonnées pour recherche précise
+✅ **Détection EASA intelligente**
+- Patterns détectés : `CS 25.xxx`, `AMC 25.xxx`, `GM 25.xxx`, `CS-E`, `CS-APU`
+- Exemple : `CS 25.613 Fatigue evaluation of metallic structure`
+- Métadonnées stockées : `section_id`, `section_kind`, `section_title`
 
-✅ **Chunking intelligent**
-- Découpe en morceaux de ~1000 caractères
-- Overlap de 150 caractères pour garder le contexte
-- Respecte les frontières de sentences
+✅ **Chunking adaptatif intelligent**
+
+Le système analyse automatiquement la **densité du contenu** et adapte la taille des chunks :
+
+| Type de contenu | Caractéristiques détectées | Taille chunk |
+|-----------------|---------------------------|--------------|
+| **Très dense** | Code, formules, tableaux | 800 caractères |
+| **Dense** | Spécifications, listes | 1200 caractères |
+| **Normal** | Prose technique | 1500 caractères |
+| **Léger** | Narratif, introductions | 2000 caractères |
+
+**Métriques analysées :**
+- Densité de termes techniques (80+ mots-clés aéronautiques)
+- Ratio nombres/formules
+- Longueur moyenne des phrases
+- Présence de listes et tableaux
+- Densité de références (CS, AMC, GM, FAR, JAR)
+
+**Règles de chunking :**
+- Préservation des headers avec leur contenu
+- Ne coupe jamais au milieu d'une liste
+- Respecte les frontières de phrases
+- Overlap de 100 caractères pour continuité
+- Ajout préfixe `[Source: filename]` pour traçabilité
+
+✅ **Augmentation sémantique des chunks**
+
+Chaque chunk est enrichi automatiquement :
+- **Mots-clés** : Top 10 termes (TF scoring + bonus technique)
+- **Phrases clés** : Exigences ("shall", "must"), définitions
+- **Type de densité** : very_dense, dense, normal, sparse
+- **Références croisées** : CS, AMC, GM, FAR, JAR détectés (max 5)
 
 ✅ **Déduplication**
-- Vérifie le CSV de tracking de la base
-- Skip automatiquement les fichiers déjà ingérés
-- Évite les doublons même sur plusieurs sessions
+- CSV de tracking par base : `documents_ingeres_[nom_base].csv`
+- Skip automatique des fichiers déjà ingérés
+- Pas de doublons même sur plusieurs sessions
 
 ✅ **Stockage FAISS réseau**
-- Sauvegarde automatique après chaque ajout
+- Sauvegarde automatique après chaque batch (4000 chunks)
 - Compatible partages réseau Windows
-- Pas de problèmes de verrous (pas de SQLite)
+- Pas de verrous SQLite
+- Index vectoriel 1024 dimensions (Snowflake Arctic)
 
 ---
 
@@ -274,7 +312,21 @@ Chaque source affiche :
 - **Score** : pertinence (0 = pas pertinent, 1 = très pertinent)
 - **Distance** : distance L2 FAISS (plus petit = meilleur)
 - **Section EASA** : si détectée (ex: `CS 25.613`)
+- **Mots-clés** : termes techniques extraits du chunk
+- **Références** : sections CS/AMC/GM mentionnées dans le chunk
 - **Passage utilisé** : le texte exact récupéré de vos documents
+
+#### 🔗 Expansion de contexte automatique
+
+Le système enrichit automatiquement les résultats de recherche :
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| **Chunks voisins** | Inclut le chunk précédent/suivant du même fichier |
+| **Sections référencées** | Si un chunk mentionne `CS 25.573`, inclut les chunks de cette section |
+| **Index inversé** | Lookup rapide O(1) des chunks par référence |
+
+Cela permet d'obtenir plus de contexte sans multiplier les requêtes vectorielles.
 
 #### 🔄 Amélioration par retours utilisateurs (Re-ranking)
 
@@ -380,6 +432,31 @@ Visualisez les statistiques et tendances des retours utilisateurs.
 - Testé avec plusieurs milliers de documents
 - Performance stable même sur partage réseau
 
+### Chunking et Parsing
+
+**Q : Comment fonctionne le chunking adaptatif ?**
+- Le système analyse automatiquement la **densité du contenu**
+- Documents denses (code, formules) → chunks plus petits (800 car.)
+- Documents légers (narratif) → chunks plus grands (2000 car.)
+- Métriques : termes techniques, ratio numérique, longueur phrases
+
+**Q : Quels formats de documents sont supportés ?**
+- **PDF** : pdfminer.six + PyMuPDF fallback + extraction pièces jointes
+- **DOCX/DOC** : python-docx avec extraction tables et sections
+- **XML** : Parser EASA configurable (CS, AMC, GM, CS-E, CS-APU)
+- **TXT/MD/CSV** : Lecture native avec détection encodage
+
+**Q : Les sections EASA sont-elles détectées automatiquement ?**
+- ✅ **Oui !** Patterns détectés : `CS 25.xxx`, `AMC`, `GM`, `CS-E`, `CS-APU`
+- Chaque chunk conserve : section_id, section_kind, section_title
+- Préfixe de contexte ajouté : `[CS 25.571 - Damage tolerance...]`
+
+**Q : Comment sont extraites les références croisées ?**
+- Patterns détectés : `see CS 25.571`, `refer to AMC...`, `in accordance with...`
+- Références FAR/JAR : `FAR 25.571`, `JAR 25.571`
+- Références internes : `paragraph (a)`, `sub-paragraph (1)`
+- Max 5 références stockées par chunk
+
 ### Requêtes
 
 **Q : Comment fonctionne la distance dans FAISS ?**
@@ -426,15 +503,28 @@ Pour toute question ou problème, contactez l'équipe de développement RaGME_UP
 
 ---
 
-## 🆕 Nouveautés de cette version
+## 🆕 Nouveautés de cette version (v1.3)
 
-### 📝 Système de feedback utilisateur simplifié (NOUVEAU)
+### 🧠 Chunking Adaptatif Intelligent (NOUVEAU)
+- 📊 **Analyse de densité** : détection automatique du type de contenu
+- 📏 **Taille adaptative** : 800-2000 caractères selon densité
+- 🏷️ **Augmentation sémantique** : mots-clés, phrases clés, références
+- 🔗 **Références croisées** : détection CS, AMC, GM, FAR, JAR
+- 🔍 **Expansion de contexte** : chunks voisins et sections référencées
+
+### 📄 Parsing Multi-Format (NOUVEAU)
+- **PDF** : pdfminer.six + PyMuPDF fallback + pièces jointes
+- **DOCX** : python-docx avec tables, sections, paragraphes
+- **XML** : Parser EASA configurable (CS, AMC, GM, CS-E, CS-APU)
+- **Multi-encodage** : UTF-8, UTF-16, Latin-1, ISO-8859-1, CP1252
+
+### 📝 Système de feedback utilisateur simplifié
 - 👍👎 **Feedback rapide** : un simple clic pouce haut ou pouce bas
 - 💡 **Réponse attendue** : champ pour indiquer la réponse souhaitée si 👎
 - 📊 **Tableau de bord** : taux de satisfaction et questions problématiques
 - 🔟 **10 sources affichées** : plus de contexte pour chaque réponse
 
-### 🔄 Re-ranking intelligent (NOUVEAU)
+### 🔄 Re-ranking intelligent
 - 🎯 **Amélioration par feedbacks** : apprentissage à partir des 👍 et 👎
 - 🔍 **Questions similaires** : utilisation des feedbacks de questions passées
 - ⚙️ **Option activable** : checkbox "Utiliser les retours utilisateurs"
