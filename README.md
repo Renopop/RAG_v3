@@ -8,7 +8,7 @@ Système RAG (Retrieval-Augmented Generation) pour l'indexation et l'interrogati
 
 - **[Guide Utilisateur](GUIDE_UTILISATEUR.md)** - Documentation complète pour utiliser l'application
 - **[Installation Réseau](INSTALLATION_RESEAU.md)** - Guide de déploiement multi-utilisateurs
-- **[Synthèse Développement](SYNTHESE_DEVELOPPEMENT.md)** - Documentation technique complète
+- **[Architecture Technique](ARCHITECTURE_TECHNIQUE.md)** - Documentation technique complète (chunking, parsers, pipeline)
 
 ---
 
@@ -208,6 +208,131 @@ Document
 
 ---
 
+## 📄 Système de Parsing Multi-Format
+
+Le système supporte l'extraction de texte depuis de multiples formats de documents avec des stratégies de fallback robustes.
+
+### Formats supportés
+
+| Format | Bibliothèque principale | Fallback | Fonctionnalités spéciales |
+|--------|------------------------|----------|---------------------------|
+| **PDF** | pdfminer.six | PyMuPDF (fitz) | Extraction pièces jointes, nettoyage Unicode |
+| **DOCX** | python-docx | - | Tables, sections, paragraphes |
+| **DOC** | python-docx | - | Support basique |
+| **XML** | xml.etree.ElementTree | - | Patterns EASA configurables |
+| **TXT/MD** | Lecture native | - | Détection encodage |
+| **CSV** | Lecture native | - | Extraction texte brut |
+
+### Parser PDF (`pdf_processing.py`)
+
+Le parser PDF est le plus sophistiqué avec une architecture à double fallback :
+
+```
+PDF Input
+    │
+    ▼
+┌─────────────────────────┐
+│  pdfminer.six           │  ← Extraction principale
+│  (extraction texte)     │
+└──────────┬──────────────┘
+           │ Échec?
+           ▼
+┌─────────────────────────┐
+│  PyMuPDF (fitz)         │  ← Fallback robuste
+│  (extraction fallback)  │
+└──────────┬──────────────┘
+           │
+           ▼
+┌─────────────────────────┐
+│  Extraction pièces      │  ← Automatique
+│  jointes récursive      │
+└──────────┬──────────────┘
+           │
+           ▼
+┌─────────────────────────┐
+│  Nettoyage Unicode      │  ← Surrogates, encodages
+│  & caractères spéciaux  │
+└─────────────────────────┘
+```
+
+**Fonctionnalités clés :**
+- **Extraction pièces jointes** : Détecte et extrait récursivement les PDF/fichiers attachés
+- **Gestion Unicode** : Nettoyage automatique des caractères surrogates
+- **Multi-encodage** : Détection automatique (UTF-8, UTF-16, Latin-1, ISO-8859-1, CP1252)
+- **Heuristiques qualité** : Détecte si l'extraction est fiable
+
+### Parser DOCX (`docx_processing.py`)
+
+Extraction structurée des documents Word :
+
+```python
+# Modes d'extraction disponibles
+docx_to_text(path)                    # Texte complet
+extract_paragraphs_from_docx(path)    # Liste des paragraphes
+extract_sections_from_docx(path)      # Sections par headers (Heading 1/2)
+extract_text_from_tables(path)        # Contenu des tableaux
+```
+
+**Fonctionnalités :**
+- Préservation des sauts de ligne
+- Détection des styles de titres (Heading 1/2, Titre 1/2)
+- Extraction des tableaux
+- Normalisation des espaces
+
+### Parser XML EASA (`xml_processing.py`)
+
+Parser configurable pour les documents XML réglementaires :
+
+```python
+# Patterns préconfigurés
+class SectionPattern(Enum):
+    CS_STANDARD = r"CS[-\s]?25[.\s]?\d+"      # CS 25.101, CS-25.101
+    AMC = r"AMC[-\s]?25[.\s]?\d+"              # AMC 25.101
+    GM = r"GM[-\s]?25[.\s]?\d+"                # GM 25.101
+    CS_E = r"CS[-\s]?E[-\s]?\d+"               # CS-E 100
+    CS_APU = r"CS[-\s]?APU[-\s]?\d+"           # CS-APU 100
+    ALL_EASA = r"(CS|AMC|GM)[-\s]?..."         # Tous patterns
+    CUSTOM = "custom"                          # Pattern personnalisé
+```
+
+**Configuration :**
+```python
+XMLParseConfig(
+    pattern_type=SectionPattern.ALL_EASA,
+    custom_pattern=None,           # Pour pattern personnalisé
+    include_section_title=True,
+    min_section_length=50,
+    excluded_tags=['note', 'amendment']
+)
+```
+
+### Chargement unifié (`rag_ingestion.py`)
+
+Le système détecte automatiquement le format et applique le parser approprié :
+
+```python
+def load_file_content(path, xml_configs=None):
+    extension = Path(path).suffix.lower()
+
+    if extension == '.pdf':
+        return extract_text_and_attachments(path)
+    elif extension in ['.docx', '.doc']:
+        return docx_to_text(path)
+    elif extension == '.xml':
+        return parse_xml_with_config(path, xml_configs)
+    elif extension in ['.txt', '.md']:
+        return read_text_file(path)
+    elif extension == '.csv':
+        return extract_csv_text(path)
+```
+
+**Traitement parallèle :**
+- ThreadPoolExecutor pour compatibilité Windows
+- Nombre de workers = CPU count
+- Gestion robuste des erreurs par fichier
+
+---
+
 ## ⚙️ Configuration des répertoires
 
 L'application nécessite plusieurs répertoires de stockage. Au premier lancement, si ces répertoires ne sont pas accessibles, une **page de configuration** s'affiche automatiquement.
@@ -237,8 +362,52 @@ L'application nécessite plusieurs répertoires de stockage. Au premier lancemen
   "base_root_dir": "C:\\Data\\FAISS_DATABASE\\BaseDB",
   "csv_import_dir": "C:\\Data\\FAISS_DATABASE\\CSV_Ingestion",
   "csv_export_dir": "C:\\Data\\FAISS_DATABASE\\CSV_Tracking",
-  "feedback_dir": "C:\\Data\\FAISS_DATABASE\\Feedbacks"
+  "feedback_dir": "C:\\Data\\FAISS_DATABASE\\Feedbacks",
+  "local_embedding_path": "",
+  "local_llm_path": "",
+  "local_reranker_path": ""
 }
+```
+
+---
+
+## 🔧 Paramètres de Chunking
+
+Les paramètres de chunking peuvent être ajustés dans `chunking.py` et `rag_ingestion.py` :
+
+### Paramètres par défaut
+
+| Paramètre | Valeur | Description |
+|-----------|--------|-------------|
+| `base_chunk_size` | 1000 | Taille de base avant adaptation à la densité |
+| `min_chunk_size` | 200 | Taille minimale (fusion si inférieur) |
+| `max_chunk_size` | 2000-2500 | Taille maximale après adaptation |
+| `overlap` | 100 | Chevauchement entre chunks consécutifs |
+| `merge_small_sections` | True | Fusion des sections < 300 caractères |
+
+### Tailles adaptatives par densité
+
+```python
+CHUNK_SIZES = {
+    "very_dense": 800,   # Code, formules, tableaux techniques
+    "dense": 1200,       # Spécifications, listes de requirements
+    "normal": 1500,      # Prose technique standard
+    "sparse": 2000       # Narratif, introductions
+}
+```
+
+### Personnalisation
+
+Pour modifier le comportement par défaut, éditez `rag_ingestion.py` :
+
+```python
+# Ligne ~180
+adapted_chunk_size = _get_adaptive_chunk_size(
+    text,
+    base_size=1000,      # Modifier ici
+    min_size=600,        # Modifier ici
+    max_size=2000        # Modifier ici
+)
 ```
 
 ---
@@ -256,9 +425,9 @@ L'application nécessite plusieurs répertoires de stockage. Au premier lancemen
 Consultez la documentation pour toute question :
 - Questions d'utilisation → [Guide Utilisateur](GUIDE_UTILISATEUR.md)
 - Installation réseau → [Installation Réseau](INSTALLATION_RESEAU.md)
-- Développement/maintenance → [Synthèse Développement](SYNTHESE_DEVELOPPEMENT.md)
+- Développement/maintenance → [Architecture Technique](ARCHITECTURE_TECHNIQUE.md)
 
 ---
 
-**Version:** 1.2
-**Dernière mise à jour:** 2025-11-26
+**Version:** 1.3
+**Dernière mise à jour:** 2025-11-27
